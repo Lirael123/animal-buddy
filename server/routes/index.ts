@@ -32,4 +32,20 @@ router.get('/api/health', (req, res) => {
   });
 });
 
+/**
+ * API 未命中守卫（必须放在所有 API 路由之后、SPA fallback 之前）。
+ * 能走到这里的 /api/* 请求，说明没有任何后端路由匹配：
+ *   - 路径拼写错误
+ *   - HTTP 方法不对（如对仅注册 POST 的接口发起 GET）
+ *   - 版本落后导致接口尚未注册
+ * 一律返回 404 JSON，绝不让它穿透到 SPA fallback 返回 index.html，
+ * 避免「API 请求拿到 200 HTML」掩盖真实错误。
+ */
+router.use('/api', (req, res) => {
+  res.status(404).json({
+    error: 'api_not_found',
+    message: `No API route matches ${req.method} ${req.originalUrl}`,
+  });
+});
+
 export default router;

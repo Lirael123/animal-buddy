@@ -20,11 +20,17 @@ export interface AppConfig {
   agentId: string;
 }
 
-/** 从运行时环境读取 Agent 配置；缺省时返回空配置表示未接入 */
+interface ImportMetaEnv {
+  COZE_AGENT_BASE_URL?: string;
+  COZE_AGENT_ID?: string;
+}
+
+/** 从构建期环境变量读取 Agent 配置；缺省时返回空配置表示未接入 */
 export function getAgentConfig(): AppConfig {
+  const env = (import.meta as unknown as { env?: ImportMetaEnv }).env ?? {};
   return {
-    baseUrl: process.env?.COZE_AGENT_BASE_URL ?? '',
-    agentId: process?.env?.COZE_AGENT_ID ?? '',
+    baseUrl: env.COZE_AGENT_BASE_URL ?? '',
+    agentId: env.COZE_AGENT_ID ?? '',
   };
 }
 

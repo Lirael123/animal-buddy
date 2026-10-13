@@ -1,28 +1,27 @@
-export type RouteName = 'home' | 'talk';
+export type RouteName = 'home' | 'talk' | 'listen' | 'retry' | 'progress';
 
 const routes: Record<string, RouteName> = {
   '': 'home',
   '#/': 'home',
   '#/talk': 'talk',
+  '#/listen': 'listen',
+  '#/retry': 'retry',
+  '#/progress': 'progress',
 };
 
 export function parseHash(): RouteName {
-  const hash = window.location.hash || '';
-  return routes[hash] ?? 'home';
+  return routes[window.location.hash || ''] ?? 'home';
 }
 
 export function navigate(to: RouteName): void {
-  const target = to === 'home' ? '#/' : `#/${to}`;
-  window.location.hash = target;
+  window.location.hash = to === 'home' ? '#/' : `#/${to}`;
 }
 
-/** 注册一个最小哈希路由：解析 hash 变化后调用渲染函数 */
 export function initRouter(render: (route: RouteName) => void): void {
   const onHashChange = (): void => {
     render(parseHash());
-    window.scrollTo({ top: 0, behavior: 'smooth' });
+    window.scrollTo({ top: 0 });
   };
-
   window.addEventListener('hashchange', onHashChange);
   onHashChange();
 }

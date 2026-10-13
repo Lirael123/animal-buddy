@@ -4,13 +4,13 @@
 
 :root {
   --background: #fff9ef;
-  --foreground: #4a3f5c;
+  --foreground: #2e3a45;
 }
 
 html,
 body,
 #app {
-  height: 100%;
+  min-height: 100%;
 }
 
 body {
@@ -26,13 +26,12 @@ body {
   height: 10px;
 }
 ::-webkit-scrollbar-thumb {
-  background: #a8e6cf;
+  background: #8fe3b6;
   border-radius: 9999px;
 }
 ::-webkit-scrollbar-track {
   background: transparent;
 }
-
 .no-scrollbar::-webkit-scrollbar {
   display: none;
 }
@@ -46,5 +45,39 @@ body {
   transition: transform 0.12s ease, box-shadow 0.2s ease, filter 0.2s ease;
 }
 .pressable:active {
-  transform: scale(0.96);
+  transform: scale(0.95);
+}
+
+/* 绘本风大标题：白描边 + 深色字 */
+.title-stroke {
+  text-shadow:
+    3px 0 #fff, -3px 0 #fff, 0 3px #fff, 0 -3px #fff,
+    2px 2px #fff, -2px -2px #fff, 2px -2px #fff, -2px 2px #fff,
+    0 7px 10px rgba(60, 120, 80, 0.25);
+}
+
+/* 木质指示牌 */
+.wood-sign {
+  background: linear-gradient(#f9eab8, #f3d884);
+  border: 3px solid #d8b85e;
+  box-shadow:
+    inset 0 2px 0 rgba(255, 255, 255, 0.6),
+    0 8px 18px -8px rgba(120, 90, 30, 0.5);
+}
+
+/* 均衡器波形条 */
+.eq-bar {
+  display: inline-block;
+  width: 5px;
+  border-radius: 9999px;
+  background: #28c76f;
+  transform-origin: center;
+  animation: eq 0.9s ease-in-out infinite;
+}
+
+/* 录音波形（灰色静态底） */
+.eq-bar.idle {
+  background: #bfe0cd;
+  animation: none;
+  transform: scaleY(0.5);
 }

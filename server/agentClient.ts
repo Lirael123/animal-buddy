@@ -20,13 +20,17 @@ export interface AgentConfig {
   projectId: string;
 }
 
+/** 原智能体 project_id（用户确认提供；完整数字字符串防大整数精度丢失） */
+const DEFAULT_PROJECT_ID = '7695394094121631763';
+
 /** 读取并校验服务端环境变量的 Agent 配置。缺项会给出明确错误信息，不猜测。 */
 export function resolveAgentConfig(): AgentConfig {
   // 原智能体 /stream_run 地址（用户提供；也可用 AGENT_API_URL 覆盖）
   const apiUrl =
     process.env.AGENT_API_URL ?? 'https://sf3vptr7j6.coze.site/stream_run';
   const token = process.env.ANIMAL_BUDDY_AGENT_TOKEN;
-  const projectId = process.env.ANIMAL_BUDDY_AGENT_PROJECT_ID;
+  // project_id：优先环境变量覆盖（便于切换），缺省用用户确认的原智能体 project_id
+  const projectId = process.env.ANIMAL_BUDDY_AGENT_PROJECT_ID ?? DEFAULT_PROJECT_ID;
 
   if (!apiUrl) {
     throw new Error(
@@ -36,11 +40,6 @@ export function resolveAgentConfig(): AgentConfig {
   if (!token) {
     throw new Error(
       'ANIMAL_BUDDY_AGENT_TOKEN 未配置：缺少原智能体 API Token（Authorization: Bearer <token>）',
-    );
-  }
-  if (!projectId) {
-    throw new Error(
-      'ANIMAL_BUDDY_AGENT_PROJECT_ID 未配置：缺少原智能体 project_id',
     );
   }
   // project_id 必须作为完整字符串传递（避免 JS Number 大整数精度丢失）

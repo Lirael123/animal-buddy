@@ -23,6 +23,7 @@ export type SourceKind = 'textbook' | 'adapted';
 /** 结构化错误分类（用于精准反馈与学习记录） */
 export type ErrorType =
   | 'grammar' // 语法错误（如 I has）
+  | 'missing_article' // 仅缺不定冠词 a/an，词汇理解正确、句型需规范（如 I see panda）
   | 'word' // 词汇不在教材集合内 / 用词不当
   | 'mismatch' // 内容与当前问题不匹配（答非所问）
   | 'incomplete' // 说得不完整，能理解但需补全
@@ -122,14 +123,6 @@ function evaluateAnswer(raw: string, turn: DialogueTurn): Evaluation {
 
   // 优先级最高：先判是否已答对当前题（含合理变式），再做错误分类。
   // —— 这样避免"学生已答对但句子另有小瑕疵"被打回，也避免语法硬规则抢跑。
-  if (missingDefiniteArticleOnly(n, turn)) {
-    return {
-      verdict: 'correct',
-      matched: 'acceptable',
-      sourceKind: 'adapted',
-      errorType: 'none',
-    };
-  }
   const textbookHit = matches(n, turn.expectedPatterns);
   if (textbookHit) {
     return { verdict: 'correct', matched: textbookHit, sourceKind: 'textbook', errorType: 'none' };
@@ -139,6 +132,20 @@ function evaluateAnswer(raw: string, turn: DialogueTurn): Evaluation {
   const hardIssue = detectHardGrammarError(n, turn);
   if (hardIssue) {
     return { verdict: 'incorrect', sourceKind: 'adapted', issue: hardIssue, errorType: 'grammar' };
+  }
+
+  // 仅缺不定冠词 a/an（句子式回答）：核心词已说对，但"完整句"少了 a/an 需规范。
+  // 放在 bare-word 可接受命中【之前】，避免 "I see panda" 因只含裸词 panda 被误判为正确；
+  // 但仅对「多词句子式」回答生效，单个裸词（如只答 panda）仍视为可接受变式。
+  const missingArt = detectMissingRequiredArticle(n, turn);
+  if (missingArt) {
+    const v = missingArt.article === 'an' ? 'an' : 'a';
+    return {
+      verdict: 'incomplete',
+      sourceKind: 'adapted',
+      issue: `单词 ${missingArt.word} 你说对啦！不过说完整句子时，${missingArt.word} 前面要加一个小词 ${v}，读出 “${suggestFullSentence(n, missingArt.word, v)}” 更规范哦。`,
+      errorType: 'missing_article',
+    };
   }
 
   const acceptHit = matches(n, turn.acceptablePatterns);
@@ -226,25 +233,40 @@ function jointGrammarModel(raw: string, turn: DialogueTurn): string {
 }
 
 /**
- * 仅缺无 the/a/an（可数名词单数前缺限定词）时，语义正确 —— 三年级合理变式，判可接受。
- * 例：Zoo 里 "I see panda" → 可接受（adapted），不判错。
+ * 仅缺不定冠词 a/an 的语法残缺检测。
+ * 说明：学生已正确说出核心词（如 panda），因说完整句时单数可数名词前要加 a/an，
+ * 属「词汇理解正确、句型仍需规范」的情形。返回缺的词与应是 a 还是 an。
+ * 例：I see panda → { word:'panda', article:'a' }；It is elephant → { word:'elephant', article:'an' }。
  */
-function missingDefiniteArticleOnly(normalized: string, turn: DialogueTurn): boolean {
-  const zoo = ['panda', 'monkey', 'tiger', 'elephant', 'lion'];
-  const pets = ['dog', 'cat', 'fish', 'bird', 'rabbit'];
-  const words = [...zoo, ...pets].map(w => `(?:${w}s?|an? ${w})`);
-  const anyAnimal = new RegExp(`(^|\\s)(${words.join('|')})(\\s|$)`, 'i');
-  if (!anyAnimal.test(normalized)) return false;
-  // 已含确定/不定冠词 → 不算"缺限定词"
-  if (/the| a | an /i.test(normalized)) return false;
-  // Zoo 动物识别轮：I see panda / It is tiger / likes panda 等语义正确
-  if ((turn.page === 32 || turn.page === 33) && zoo.some(w => new RegExp(`\\b${w}s?\\b`, 'i').test(normalized))) {
-    return true;
+function detectMissingRequiredArticle(normalized: string, turn: DialogueTurn): { word: string; article: 'a' | 'an' } | null {
+  // 仅当本轮教材句型本就要求「单数动物/宠物名词前加 a/an」（I see a / It is a / This is a / I have a）
+  // 时才做"缺 a/an"提示；否则（如 I like the...、属性句）不适用，避免误提示。
+  const frames = turn.expectedPatterns.join(' ');
+  if (!/i see a |it is a |it's a |this is a |i have a /i.test(` ${frames} `)) return null;
+
+  // 仅句子式（多词）回答才判定"缺 a/an"；单个裸词（如只答 panda）属可接受变式，不打断
+  const tokens = normalized.split(/\s+/).filter(Boolean);
+  if (tokens.length < 2) return null;
+  // 句子结构里带了目标词（名词前无 a/an/the）
+  const forms: [string, 'a' | 'an'][] = [
+    ['elephant', 'an'], ['monkey', 'a'], ['panda', 'a'], ['tiger', 'a'], ['lion', 'a'],
+    ['rabbit', 'a'], ['bird', 'a'], ['dog', 'a'], ['cat', 'a'], ['fish', 'a'],
+  ];
+  // 已带限定词 → 不需要提示
+  if (/\b(the|a|an)\b/i.test(normalized)) return null;
+  for (const [w, article] of forms) {
+    if (new RegExp(`\\b${w}\\b`, 'i').test(normalized)) {
+      return { word: w, article };
+    }
   }
-  if ((turn.page === 28 || turn.page === 29) && pets.some(w => new RegExp(`\\b${w}s?\\b`, 'i').test(normalized))) {
-    return true;
-  }
-  return false;
+  return null;
+}
+
+/** 把"缺 a/an 的句子"补全成规范表达（按本题使用的句型，尽量贴合原句结构） */
+function suggestFullSentence(normalized: string, word: string, article: 'a' | 'an'): string {
+  const v = article === 'an' ? 'an' : 'a';
+  // 已带的"裸名词"换成带冠词形式（I see panda → I see a panda）
+  return normalized.replace(new RegExp(`\\b${word}\\b`, 'i'), `${v} ${word}`);
 }
 
 /** 词汇错误：出现了教材范围外的动物/宠物词，与本题无关 → 属于词汇用错 */
@@ -511,6 +533,7 @@ export async function runTutorTurn(req: Request, input: RunInput): Promise<Tutor
 function errorTypeLabel(t: ErrorType): string {
   switch (t) {
     case 'grammar': return '语法错误';
+    case 'missing_article': return '少了 a/an，句型需规范';
     case 'word': return '词汇使用不当';
     case 'mismatch': return '与当前问题不匹配';
     case 'incomplete': return '表达不够完整';

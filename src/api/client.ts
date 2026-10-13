@@ -171,3 +171,131 @@ export async function fetchUnitAudio(id: string): Promise<UnitAudioItem> {
   }
   return data;
 }
+
+// ===========================================================================
+// 第三阶段 3A：正式听写 / 服务端评分 / 错题记录 / 学习进度
+// ===========================================================================
+
+export type DictationType = 'word' | 'sentence';
+export type DictationSource = 'textbook' | 'adapted';
+export type ScoreStatus =
+  | 'correct' | 'grammar' | 'word' | 'missing_article' | 'unclear' | 'wrong';
+
+export interface DictationItem {
+  id: string;
+  type: DictationType;
+  page: number;
+  section: string;
+  category: string;
+  difficulty: string;
+  scorable: boolean;
+  audioText: string;
+  source: DictationSource;
+  prompt: string;
+}
+
+export interface DictationListResult {
+  engine: 'server-dictation';
+  uid: string;
+  count: number;
+  items: DictationItem[];
+}
+
+export interface DictationScoreResult {
+  engine: 'server-dictation';
+  uid: string;
+  counted: boolean;
+  status: ScoreStatus;
+  vocabOk: boolean;
+  formOk: boolean;
+  asrSkipped: boolean;
+  hint: string;
+  reference: string | null;
+  correct: boolean;
+}
+
+export interface DictationAudioResult {
+  engine: 'textbook-mp3' | 'tts';
+  id: string;
+  url: string;
+  source: 'textbook' | 'tts';
+  word?: string;
+}
+
+export interface DictationRecordItem {
+  key: string;
+  time: string;
+  createdAt: string;
+  uid: string;
+  qid: string;
+  page: number;
+  type: DictationType;
+  session: string;
+  firstAnswer: string;
+  retries: string[];
+  errorType: string | null;
+  aiHintCount: number;
+  corrected: boolean;
+  firstCorrect: number;
+  mastered: boolean;
+  vocabOk: boolean;
+  formOk: boolean;
+  asrSkipped: boolean;
+}
+
+export interface ProgressSummary {
+  engine: 'server-dictation';
+  uid: string;
+  exercised: number;
+  masteredVocab: number;
+  firstPassRate: number;
+  correctionCount: number;
+  pending: string[];
+  reviewRecommend: string[];
+}
+
+/** 获取可练习听写题目（服务端题库，不含标准答案） */
+export async function fetchDictationList(type?: DictationType | ''): Promise<DictationListResult> {
+  return post<DictationListResult>('/api/dictation/list', { uid: 'animal-buddy-user', type: type || undefined });
+}
+
+/** 提交一题听写，服务端固定评分 + 幂等落库 + 返回反馈 */
+export async function submitDictation(
+  qid: string,
+  answer: string,
+  opts: { session: string; isAsr?: boolean; isRetry?: boolean },
+): Promise<DictationScoreResult> {
+  return post<DictationScoreResult>('/api/dictation/submit', {
+    uid: 'animal-buddy-user',
+    qid,
+    answer,
+    session: opts.session,
+    isAsr: opts.isAsr,
+    isRetry: opts.isRetry,
+  });
+}
+
+/** 获取某题的播放语音（教材原声或 TTS 合成，标注来源） */
+export async function fetchDictationAudio(qid: string): Promise<DictationAudioResult> {
+  return post<DictationAudioResult>('/api/dictation/audio', { uid: 'animal-buddy-user', qid });
+}
+
+/** 获取自己的错题记录（服务端按 uid 过滤） */
+export async function fetchDictationRecords(): Promise<DictationRecordItem[]> {
+  const res = await fetch('/api/dictation/records?uid=animal-buddy-user');
+  const data = (await res.json()) as { items?: DictationRecordItem[]; error?: string };
+  if (!res.ok || !Array.isArray(data.items)) {
+    throw new Error(data.error || '获取错题记录失败');
+  }
+  return data.items;
+}
+
+/** 获取学习进度（仅本人可读，服务端校验） */
+export async function fetchProgress(): Promise<ProgressSummary> {
+  const res = await fetch('/api/progress?uid=animal-buddy-user');
+  const data = (await res.json()) as ProgressSummary & { error?: string };
+  if (!res.ok || data.exercised === undefined) {
+    throw new Error(data.error || '获取学习进度失败');
+  }
+  return data;
+}

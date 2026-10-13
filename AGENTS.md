@@ -18,8 +18,15 @@ Animal Buddy Web：面向小学三年级（7~9 岁）的儿童英语口语互动
   - **服务端教学工作流掌控判定**：对话脚本、轮次推进、答案判定（教材原句/可接受表达/不完整/语法错误）、`I has → I have` 纠错、连续两次答错给教材句型示范，均为确定性逻辑；豆包 `doubao-seed-2-0-pro-260215` 仅负责把教学意图润色成适合三年级、可 TTS 的一句英文，**评分/推进/页码/答案不交给模型自由决定**。
   - **差异化反馈**（第二阶段 2A 增强）：豆包会针对学生本轮具体原话生成个性化英文引导（如顺着他已说对的词靠近正确答案），但只改语言、不改标准答案/页码/判定/评分。
   - 会话状态在服务端按 `uid::scene` 内存隔离；一次只问一个问题。
+- ✅ **第三阶段 3A：正式听写题库 + 服务端固定评分 + 错题记录 + 个人学习进度**（`server/tutor/dictation.ts` + `records.ts` 新增）：
+  - **听写题库**（`dictation.ts`）：来源于 `assets/03_听写固定题库.json/csv`（已核对），33 题 `scorable=true`（Part A 宠物 dog/cat/fish/bird/rabbit P29、Part B 野生动物 panda/monkey/tiger/elephant/lion P32、形容词 big/small/tall/fast P33、教材句子 P28/29/31）；每个题目含唯一 ID/type/page/section/难度/标准答案/可接受答案/source。拼读示例、动作词、拓展词与 **P34 Listen and circle 一律 `scorable=false` 禁止自动评分**，不得编造听力答案。
+    - **来源标记如实**：教材句子 `source=textbook → 播放教材原声 MP3`（`/api/dictation/audio` 映射到 `audio/unit/`，签名 URL）；单词/自编练习 `source=adapted → TTS 合成并明确标注“教学改编”`，绝不冒充教材原句。
+  - **服务端固定评分**（`scoreDictation`，答案库不下发浏览器）：大小写/句末标点宽容；可接受等价答案；`missing_article`（仅缺 a/an/the → vocabOk=true、formOk=false，温和提示规范表达）；`grammar`（has/have 等）、`word`、`unclear`（ASR 空/超短 → `asrSkipped=true` 不扣知识分）；豆包不参与改分。
+  - **API**（`voice.ts`）：`/api/dictation/list`（题元信息，无答案）、`/api/dictation/submit`（评分+幂等入账）、`/api/dictation/audio`、`/api/dictation/records`、`/api/progress`。全部 `requireUid`（3–32 位合法虚拟学生 ID）服务端侧鉴权，只返回属主本人数据，未授权拒绝（401）。
+  - **错题记录/进度**（`records.ts`）：对象存储 `dictation/records/{uid}/*.json`，按 `uid+qid+session` 幂等——同批次重复提交/刷新合并更新同一记录、`counted` 不重复累计；记录 firstAnswer/retries/errorType/aiHintCount/corrected/firstCorrect/mastered/vocabOk/formOk/asrSkipped。进度 `aggregateProgress` 按 qid 取最优记录，输出 exercised/masteredVocab/firstPassRate/correctionCount/pending/reviewRecommend（按真实错题推荐复习，不造假数据）。
+  - **2B 遗留修正**：`missingDefiniteArticleOnly` 已重命名为 `detectMissingRequiredArticle`（函数语义准确），并前置到 bare-word 接受命中前——`I see panda→I see a panda`、`It is elephant→It is an elephant` 现会给出温和规范表达提示（`missing_article`），词汇理解与句型正确性分离记录；但**仅限** I see a / It is a / This is a / I have a 句型，且多词句子式回答才触发（单个裸词 panda 仍视为可接受变式），回归 My Pet/Zoo 不受影响。
 - 📖 **教材原声**（`server/tutor/audio.ts` + `assets/说明文档.md`）：10 段 MP3 已本地 `assets/` 且已真实上传对象存储 `audio/unit/`（持久化 storageKey，播放前 `generatePresignedUrl` 动态签名）。**录音文字逐字核验、听力答案核验均为「未完成」**，一律标 `pending`，不得据文件名伪造原声文字/答案；P30 first sound、P34 Listen and circle 未核验答案不参与评分。
-- ❌ **仍未接入**（后续阶段，不伪造连接）：At the Zoo 场景工作流（第二阶段）、其余教材原声在 Let's Talk 之外的整段播放面板、服务端固定题库听写/评分与错题/学习报告/教师端（第三阶段，届时移除前端答案）、学习记录聚合看板。
+- ❌ **仍未接入**（后续阶段，不伪造连接）：其余教材原声在 Let's Talk 之外的整段播放面板、未核验听力题的自动评分、正式教师端身份认证与班级数据查看、学习记录聚合看板。
 - 前端接口出口集中在 `src/api/client.ts`；My Pet 的「选情境→AI 提问→语音回答→ASR→工作流分析→反馈/下一题→TTS→落库」全链路与「听教材原声」已在 Let's Talk 页真实打通。
 
 ## 技术栈
@@ -33,7 +40,7 @@ Animal Buddy Web：面向小学三年级（7~9 岁）的儿童英语口语互动
 - 页面：`src/pages/` 下 `home.ts`（首页）、`talk.ts`（Let's Talk 情境对话）、`listen.ts`（Let's Listen 听力听写）、`retry.ts`（Try Again 错题巩固）、`progress.ts`（My Progress 学习成长）。
 - 共享壳：`src/components/shell.ts`（内页薄荷绿顶栏 `topBar` + 左侧菜单 `sideMenu`），`src/components/ui.ts`（Toast、待接入徽章）。
 - 素材：3D 绘本风插画存于 `public/assets/`，路径常量集中在 `src/assets.ts`。
-- 交互：浏览器原生 TTS（`speechSynthesis`）与 `MediaRecorder` 仅作能力演示，非真实教材音频/ASR。
+- 交互：浏览器原生 TTS（`speechSynthesis`）与 `MediaRecorder` 仅作 Let's Listen 本地跟读/键盘输入的能力演示；真实教材原声、ASR/TTS、听写评分与学习记录均由服务端真实完成。
 
 ## 目录结构
 

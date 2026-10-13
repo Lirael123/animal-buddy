@@ -1,12 +1,6 @@
 import { Router } from 'express';
-import {
-  Config,
-  HeaderUtils,
-  ASRClient,
-  TTSClient,
-  LLMClient,
-  S3Storage,
-} from 'coze-coding-dev-sdk';
+import { Config, HeaderUtils, ASRClient, TTSClient, S3Storage } from 'coze-coding-dev-sdk';
+import { runAgentStream } from '../agentClient';
 
 const router = Router();
 
@@ -67,31 +61,31 @@ router.post('/api/tts', async (req, res) => {
   }
 });
 
-const SCENE_CONTEXT: Record<string, string> = {
-  'my-pet': `Unit 3 Our animal friends · My Pet · P28 part.
-教材核心句:
-- Do you have a pet? - Yes, I do. I have a dog.
-- What is your pet like? - It is cute and friendly.
-- This is my pet. It has two long ears and a short tail.
-你是儿童英语口语外教 Rex，面对小学三年级学生。要求：
-- 只用英语回复，句子要短、简单、友善，一次不超过 2 句。
-- 围绕 "Do you have a pet?"、"What is your pet like?" 引导学生开口说。
-- 学生发音/语法不完整时，先正面鼓励（Great/Well done），再示范正确句子让学生重复。
-- 不输出翻译，不输出学习无关内容。`,
-  'at-the-zoo': `Unit 3 Our animal friends · At the Zoo · P30 part.
-教材核心句:
-- What is that animal? - It is a giraffe. It is tall.
-- What does it look like? - It has a long neck and long legs.
-- The elephant has big ears and a long nose.
-你是儿童英语口语外教 Rex，面对小学三年级学生。要求：只用英语、句子简短友善、围绕动物园动物提问互动，鼓励学生开口。`,
-};
-
 /**
- * 3. LLM / Agent 英语回复：学生语音识别文本 → 教材外教回复
+ * 3. 教学 Agent：学生语音识别文本 → 原 Animal Buddy 智能体（跨项目 /stream_run）
+ *
+ * - 不再直接调用独立豆包模型；教学回复统一由原智能体产出。
+ * - 同一学生(uid)+场景保持同一 session_id，不同学生会话隔离。
+ * - 仅 Service 端持有 Token（ANIMAL_BUDDY_AGENT_TOKEN），前端不可见。
  */
+// 会话隔离：uid -> scene -> session_id
+const sessionStore = new Map<string, Map<string, string>>();
+
+function getSessionId(uid: string, scene: string): string {
+  const byScene = sessionStore.get(uid) ?? new Map<string, string>();
+  if (!sessionStore.has(uid)) sessionStore.set(uid, byScene);
+  let sid = byScene.get(scene);
+  if (!sid) {
+    // 新会话：用 uid + scene + 时间戳生成（不下发 token，仅作会话 key）
+    sid = `${uid.replace(/[^a-zA-Z0-9_-]/g, '')}-${scene}-${Date.now()}`;
+    byScene.set(scene, sid);
+  }
+  return sid;
+}
+
 router.post('/api/chat', async (req, res) => {
   try {
-    const { text, scene, history } = req.body as {
+    const { text, scene } = req.body as {
       text?: string;
       scene?: string;
       history?: { role: 'user' | 'assistant'; content: string }[];
@@ -100,21 +94,31 @@ router.post('/api/chat', async (req, res) => {
       return res.status(400).json({ error: 'missing text' });
     }
     const uid = uidOf(req);
-    const context = SCENE_CONTEXT[scene ?? 'my-pet'] ?? SCENE_CONTEXT['my-pet'];
-    const messages: { role: 'system' | 'user' | 'assistant'; content: string }[] = [
-      { role: 'system', content: context },
-    ];
-    if (Array.isArray(history)) {
-      messages.push(...history.slice(-8));
-    }
-    messages.push({ role: 'user', content: text });
+    const sceneKey = scene ?? 'my-pet';
+    const sessionId = getSessionId(uid, sceneKey);
 
-    const client = new LLMClient(new Config(), forward(req));
-    const resp = await client.invoke(messages, {
-      model: 'doubao-seed-2-0-pro-260215',
-      temperature: 0.6,
+    const result = await runAgentStream(req, {
+      uid,
+      scene: sceneKey,
+      prompt: text.trim(),
+      sessionId,
     });
-    res.json({ reply: resp.content });
+
+    if (!result.success) {
+      // 真实失败（鉴权/参数/超时/知识库未命中等）：如实返回错误，不回退豆包。
+      console.error(`[agent] ${result.detail} uid=${uid} scene=${sceneKey}`);
+      return res.status(502).json({
+        error: 'Animal Buddy Agent 调用失败',
+        detail: result.detail,
+        agentConfigured: false,
+      });
+    }
+
+    // 记录会话 id 到 store（原样返回），便于连续对话复用
+    const byScene = sessionStore.get(uid)!;
+    byScene.set(sceneKey, result.sessionId || sessionId);
+
+    res.json({ reply: result.reply, sessionId: result.sessionId || sessionId });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error('[chat] failed:', msg);

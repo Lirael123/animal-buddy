@@ -7,9 +7,9 @@ Animal Buddy Web：面向小学三年级（7~9 岁）的儿童英语口语互动
 后端能力联通状态：
 - ✅ **已真实联通**（后端 Express 路由 `server/routes/voice.ts` + `coze-coding-dev-sdk`）：
   - `/api/asr` 语音识别（英文）、`/api/tts` 语音合成（英文→mp3 URL）
-  - `/api/chat` Agent 英语回复（doubao 大模型，教材场景引导）
   - `/api/talk/record` 对话/纠错过程持久化（对象存储 JSON）
-- ❌ **仍未接入**（资源在本项目不可达，不伪造连接）：教材原声(Unit 3 MP3，对象存储无该资源)、Unit 3 知识库（本项目无教材数据）、原 Agent 项目公共 API（localhost:9000/9001 不可跨项目访问）、学习记录聚合看板（数据库无业务表）。
+- ⏸️ **原 Animal Buddy 智能体（教学 Agent，`server/agentClient.ts`）**：`/api/chat` 已从独立豆包模型切换为跨项目调用原智能体 `https://sf3vptr7j6.coze.site/stream_run`（SSE 按 sequence 拼接 + message_end 校验 + 会话隔离）。**缺 2 个服务端环境变量而尚未真正连通**：`ANIMAL_BUDDY_AGENT_TOKEN`（原 Agent API Token）、`ANIMAL_BUDDY_AGENT_PROJECT_ID`（原 Agent project_id）。未配置时 `/api/chat` 如实返回 502 错误，**绝不回退豆包**。
+- ❌ **仍未接入**（资源在本项目不可达，不伪造连接）：教材原声(Unit 3 MP3，对象存储无该资源)、Unit 3 知识库（本项目无教材数据）、学习记录聚合看板（数据库无业务表）。
 - 前端接口出口集中在 `src/api/client.ts`，真实链路已在 My Pet 场景的 Let's Talk 页打通。
 
 ## 技术栈

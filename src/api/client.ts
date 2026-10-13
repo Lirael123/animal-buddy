@@ -1,90 +1,95 @@
 /**
  * Animal Buddy 后端能力接口层。
  *
- * ⚠️ 重要状态说明
- * ------------------------------------------------
- * 现有 Animal Buddy Agent 已包含：教材知识库、教材录音、
- * ASR（语音识别）、TTS（语音合成）、学习记录。
+ * 状态说明（真实联通情况）：
+ * --------------------------------------------------
+ * ✅ 已真实接入（本云项目平台集成，后端 Express 路由 + coze-coding-dev-sdk）：
+ *    - /api/asr   语音识别（英文）
+ *    - /api/tts   语音合成（英文回复 → 可播放 mp3 URL）
+ *    - /api/chat  Agent 回复（doubao 大模型，教材场景引导）
+ *    - /api/talk/record  对话与纠错过程持久化（对象存储 JSON）
  *
- * 但在本次「网页预览」阶段，这些后端能力**尚未联通**。
- * 本文件为唯一接口出口，仅预留函数签名与请求构造逻辑，
- * 用于将来对接 Agent API；未经后端真实联调前均标记为
- * 「待接入」，UI 也不会伪造返回成功的假数据。
- * ------------------------------------------------
+ * ❌ 仍待接入（资源在本项目暂不可达，不伪造连接）：
+ *    - 教材原声音频（Unit 3 的 MP3）——对象存储中不存在该资源
+ *    - Unit 3 教材知识库       ——本项目知识库/数据库中无教材数据
+ *    - 原 Agent 项目公共 API   ——localhost:9000/9001 不可跨项目访问
+ *    - 学习记录聚合看板        ——数据库无业务表
+ * --------------------------------------------------
  */
 
-export interface AppConfig {
-  /** Agent 服务基础地址，来自运行时环境变量 */
-  baseUrl: string;
-  /** Agent 的 Bot ID 或工作流 ID，待配置 */
-  agentId: string;
+export interface ASRResult {
+  text: string;
+  duration: number | null;
+}
+export interface TTSResult {
+  audioUri: string;
+  audioSize: number;
+}
+export interface ChatResult {
+  reply: string;
 }
 
-interface ImportMetaEnv {
-  COZE_AGENT_BASE_URL?: string;
-  COZE_AGENT_ID?: string;
+export interface HistoryItem {
+  role: 'user' | 'assistant';
+  content: string;
 }
 
-/** 从构建期环境变量读取 Agent 配置；缺省时返回空配置表示未接入 */
-export function getAgentConfig(): AppConfig {
-  const env = (import.meta as unknown as { env?: ImportMetaEnv }).env ?? {};
-  return {
-    baseUrl: env.COZE_AGENT_BASE_URL ?? '',
-    agentId: env.COZE_AGENT_ID ?? '',
-  };
+/** 通用请求封装：转发给同源后端 */
+async function post<T>(path: string, body: Record<string, unknown>): Promise<T> {
+  const res = await fetch(path, {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify(body),
+  });
+  const data = (await res.json()) as T & { error?: string; detail?: string };
+  if (!res.ok || typeof (data as { error?: string }).error === 'string') {
+    const err = (data as { error?: string; detail?: string }).error ?? '请求失败';
+    throw new Error((data as { detail?: string }).detail || err);
+  }
+  return data;
 }
 
-/** 判断 Agent 是否已配置可调用 */
-export function isAgentConnected(): boolean {
-  const cfg = getAgentConfig();
-  return Boolean(cfg.baseUrl && cfg.agentId);
+/** 语音识别 ASR：接收音频 url 或 base64，返回识别文本 —— 真实后端 */
+export async function recognizeSpeech(audio: { url?: string; base64?: string }): Promise<ASRResult> {
+  const body: Record<string, unknown> = { uid: 'animal-buddy-user' };
+  if (audio.url) body.url = audio.url;
+  if (audio.base64) body.base64Data = audio.base64;
+  return post<ASRResult>('/api/asr', body);
 }
 
-export interface TalkLine {
-  speaker: 'brother' | 'buddy';
-  en: string;
-  zh: string;
+/** 语音合成 TTS：英文回复 → 可播放 mp3 URL —— 真实后端 */
+export async function synthesizeSpeech(text: string): Promise<TTSResult> {
+  return post<TTSResult>('/api/tts', { uid: 'animal-buddy-user', text });
 }
 
-/** 单个场景的对话内容（当前为静态演示数据，最终由教材知识库下发） */
-export interface SceneContent {
-  id: string;
-  title: string;
-  lines: TalkLine[];
+/** Agent 回复：学生文本 / 识别文本 → 教材外教英文回复 —— 真实后端 */
+export async function askAgent(
+  text: string,
+  scene: string,
+  history: HistoryItem[],
+): Promise<ChatResult> {
+  return post<ChatResult>('/api/chat', { uid: 'animal-buddy-user', text, scene, history });
 }
 
-/** 教材原声：待接入（返回绝对 URL 或音频 base64） */
+/** 记录对话/纠错过程 —— 真实后端（对象存储持久化） */
+export async function recordTalk(entry: {
+  scene: string;
+  role: 'user' | 'assistant' | 'system';
+  text: string;
+  expected?: string;
+  correction?: string;
+}): Promise<void> {
+  await post<{ ok: boolean }>('/api/talk/record', { uid: 'animal-buddy-user', ...entry });
+}
+
+/**
+ * 教材原声：待接入。
+ * 现有 Unit 3 教材音频（MP3）在本云端对象存储中不存在，且原 Agent 项目的
+ * localhost:9000/9001 不可作为公共地址访问，因此此处不返回任何伪造音频。
+ */
 export async function fetchTextbookAudio(sceneId: string): Promise<string> {
   void sceneId;
   throw new Error(
-    `[待接入] 教材原声接口尚未联通，无法返回音频资源（sceneId=${sceneId}）。`,
+    '[待接入] 教材原声音频资源在当前项目中不可用：对象存储中未发现 Unit 3 教材 MP3，需提供该资源的访问授权/地址后接入。',
   );
-}
-
-/** 语音识别 ASR：接收音频，返回识别文本 —— 待接入 */
-export async function recognizeSpeech(audio: Blob): Promise<string> {
-  void audio;
-  throw new Error('[待接入] ASR 语音识别接口尚未联通，无法识别语音。');
-}
-
-/** 语音合成 TTS：接收文本，返回音频 Blob —— 待接入 */
-export async function synthesizeSpeech(text: string): Promise<Blob> {
-  void text;
-  throw new Error('[待接入] TTS 语音合成接口尚未联通，无法合成语音。');
-}
-
-/** 教材知识库：按场景查询对话内容 —— 待接入 */
-export async function fetchScene(sceneId: string): Promise<SceneContent | null> {
-  void sceneId;
-  throw new Error('[待接入] 教材知识库接口尚未联通，无法获取对话内容。');
-}
-
-/** 学习记录：上报一次练习结果 —— 待接入 */
-export async function saveProgress(
-  sceneId: string,
-  correct: boolean,
-): Promise<void> {
-  void sceneId;
-  void correct;
-  throw new Error('[待接入] 学习记录接口尚未联通，无法保存进度。');
 }

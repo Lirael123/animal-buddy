@@ -1,6 +1,10 @@
 import { Router } from 'express';
+import voiceRouter from './voice';
 
 const router = Router();
+
+// 真实语音交互链路：ASR / TTS / LLM(Agent) / 对话记录
+router.use(voiceRouter);
 
 // API 路由示例
 router.get('/api/hello', (req, res) => {

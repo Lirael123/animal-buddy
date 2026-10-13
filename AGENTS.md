@@ -2,7 +2,15 @@
 
 ## 项目简介
 
-Animal Buddy Web：面向小学三年级（7~9 岁）的儿童英语口语互动应用（人教版三年级上册 Unit 3 *Our Animal Friends*）。当前为**高保真可交互前端预览**，后端 Agent 能力（教材知识库/录音、ASR、TTS、学习记录）尚未联通，UI 统一标注「待接入」，接口出口集中在 `src/api/client.ts`。
+Animal Buddy Web：面向小学三年级（7~9 岁）的儿童英语口语互动应用（人教版三年级上册 Unit 3 *Our Animal Friends*）。
+
+后端能力联通状态：
+- ✅ **已真实联通**（后端 Express 路由 `server/routes/voice.ts` + `coze-coding-dev-sdk`）：
+  - `/api/asr` 语音识别（英文）、`/api/tts` 语音合成（英文→mp3 URL）
+  - `/api/chat` Agent 英语回复（doubao 大模型，教材场景引导）
+  - `/api/talk/record` 对话/纠错过程持久化（对象存储 JSON）
+- ❌ **仍未接入**（资源在本项目不可达，不伪造连接）：教材原声(Unit 3 MP3，对象存储无该资源)、Unit 3 知识库（本项目无教材数据）、原 Agent 项目公共 API（localhost:9000/9001 不可跨项目访问）、学习记录聚合看板（数据库无业务表）。
+- 前端接口出口集中在 `src/api/client.ts`，真实链路已在 My Pet 场景的 Let's Talk 页打通。
 
 ## 技术栈
 

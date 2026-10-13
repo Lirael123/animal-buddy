@@ -1,11 +1,13 @@
 import { ASSETS } from '../assets';
-import { toast } from '../components/ui';
+import { toast, pendingBadge, playAudio } from '../components/ui';
 import { topBar, sideMenu, bindShell, type SideItem } from '../components/shell';
+import { recognizeSpeech, synthesizeSpeech, askAgent, recordTalk } from '../api/client';
 
 interface Line {
   speaker: 'rex' | 'me';
   en: string;
-  zh: string;
+  zh?: string;
+  isUser?: boolean;
 }
 interface Scene {
   key: string;
@@ -28,9 +30,9 @@ const SCENES: Scene[] = [
     img: ASSETS.scenePet,
     caption: 'Do you have a pet?',
     lines: [
-      { speaker: 'rex', en: 'Hi! Do you have a pet?', zh: '你有宠物吗？' },
-      { speaker: 'me', en: 'Yes, I do.', zh: '是的，我有。' },
-      { speaker: 'rex', en: 'Great! What pet do you have?', zh: '太棒了！你有什么宠物？' },
+      { speaker: 'rex', en: 'Hi! Do you have a pet?' },
+      { speaker: 'me', en: 'Yes, I do.', isUser: true },
+      { speaker: 'rex', en: 'Great! What pet do you have?' },
     ],
   },
   {
@@ -42,54 +44,78 @@ const SCENES: Scene[] = [
     img: ASSETS.sceneZoo,
     caption: 'What can we see at the zoo?',
     lines: [
-      { speaker: 'rex', en: 'Look! What animal is it?', zh: '快看！那是什么动物？' },
-      { speaker: 'me', en: "It's a giraffe. It's so tall!", zh: '是长颈鹿。它好高呀！' },
-      { speaker: 'rex', en: "And that's a panda. How cute!", zh: '那边还有熊猫。真可爱！' },
+      { speaker: 'rex', en: 'Look! What animal is it?' },
+      { speaker: 'me', en: "It's a giraffe. It's so tall!", isUser: true },
+      { speaker: 'rex', en: "And that's a panda. How cute!" },
     ],
   },
 ];
 
-const state = { scene: 0, recording: false, showKeyboard: false };
+const state = {
+  scene: 0,
+  recording: false,
+  showKeyboard: false,
+  busy: false, // Agent 回复中
+  assistantAudio: '', // 最近一次 Agent 回复的 TTS 音频 URL（用于重听）
+};
 
-function speak(text: string): void {
-  if (!('speechSynthesis' in window)) {
-    toast('当前浏览器不支持语音朗读');
-    return;
-  }
-  try {
-    window.speechSynthesis.cancel();
-    const u = new SpeechSynthesisUtterance(text);
-    u.lang = 'en-US';
-    u.rate = 0.9;
-    u.pitch = 1.1;
-    window.speechSynthesis.speak(u);
-  } catch {
-    toast('语音朗读暂不可用');
-  }
+/** 动态对话历史：用教材预置 + 学生/Agent 真实回合 */
+let live: Line[] = [];
+
+function insertUserLine(text: string): void {
+  live.push({ speaker: 'me', en: text, isUser: true });
+}
+function insertAgentLine(text: string): void {
+  live.push({ speaker: 'rex', en: text });
 }
 
-function bubbles(lines: Line[]): string {
-  return lines
-    .map((l, i) => {
-      const rex = l.speaker === 'rex';
-      return `
-      <div class="flex ${rex ? '' : 'flex-row-reverse'} items-start gap-2.5 animate-fade-slide-up" style="animation-delay:${i * 90}ms">
-        <img src="${rex ? ASSETS.bunnyHero : ASSETS.avatarBoy}" alt="" class="h-11 w-11 shrink-0 rounded-full object-cover ring-2 ring-white shadow-sm" loading="lazy" width="44" height="44" />
-        <div class="flex ${rex ? '' : 'flex-row-reverse'} items-center gap-2">
-          <div class="max-w-[78%] rounded-3xl ${rex ? 'rounded-tl-md bg-white' : 'rounded-tr-md bg-sky-pale'} px-4 py-2.5 shadow-sm">
-            <p class="text-xl font-bold leading-snug text-ink">${l.en}</p>
-            <p class="mt-0.5 text-sm text-ink/45">${l.zh}</p>
-          </div>
-          <button data-speak="${i}" class="pressable grid h-9 w-9 shrink-0 place-items-center rounded-full bg-grass text-white shadow-sm">🔊</button>
-        </div>
-      </div>`;
-    })
-    .join('');
+/** 把语音 / 文本送去 Agent，得到英语回复并转语音 */
+async function runAgent(text: string, scene: string): Promise<void> {
+  if (state.busy) return;
+  state.busy = true;
+  const history: { role: 'user' | 'assistant'; content: string }[] = live
+    .filter(l => l.en)
+    .map(l => ({ role: l.speaker === 'rex' ? 'assistant' : 'user', content: l.en }));
+  try {
+    toast('外教正在组织回复…');
+    const { reply } = await askAgent(text, scene, history);
+    insertAgentLine(reply);
+    const audio = await synthesizeSpeech(reply);
+    state.assistantAudio = audio.audioUri;
+    await recordTalk({ scene, role: 'assistant', text: reply });
+  } catch (e) {
+    toast(e instanceof Error ? e.message : 'Agent 回复失败', { pending: true });
+  } finally {
+    state.busy = false;
+  }
 }
 
 function eqBars(n: number, idle = false): string {
   return Array.from({ length: n })
     .map((_, i) => `<span class="eq-bar ${idle ? 'idle' : ''} h-7" style="animation-delay:${i * 0.08}s"></span>`)
+    .join('');
+}
+
+function displayLines(): Line[] {
+  return live.length ? live : SCENES[state.scene].lines;
+}
+
+function bubbles(): string {
+  return displayLines()
+    .map((l, i) => {
+      const rex = l.speaker === 'rex';
+      return `
+      <div class="flex ${rex ? '' : 'flex-row-reverse'} items-start gap-2.5 animate-fade-slide-up" style="animation-delay:${i * 70}ms">
+        <img src="${rex ? ASSETS.bunnyHero : ASSETS.avatarBoy}" alt="" class="h-11 w-11 shrink-0 rounded-full object-cover ring-2 ring-white shadow-sm" loading="lazy" width="44" height="44" />
+        <div class="flex ${rex ? '' : 'flex-row-reverse'} items-center gap-2">
+          <div class="max-w-[78%] rounded-3xl ${rex ? 'rounded-tl-md bg-white' : 'rounded-tr-md bg-sky-pale'} px-4 py-2.5 shadow-sm">
+            <p class="text-xl font-bold leading-snug text-ink">${l.en}</p>
+            ${l.zh ? `<p class="mt-0.5 text-sm text-ink/45">${l.zh}</p>` : ''}
+          </div>
+          <button data-speak="${i}" class="pressable grid h-9 w-9 shrink-0 place-items-center rounded-full bg-grass text-white shadow-sm">🔊</button>
+        </div>
+      </div>`;
+    })
     .join('');
 }
 
@@ -126,15 +152,25 @@ export function renderTalk(): string {
 
         <!-- 右侧：对话 -->
         <section class="flex min-h-[420px] flex-1 flex-col rounded-[1.75rem] bg-gradient-to-b from-sky-pale to-mint-pale p-4 shadow-card ring-1 ring-black/5 sm:p-5">
-          <p class="mb-3 text-base font-bold text-ink/55">${s.page}</p>
-          <div class="flex flex-1 flex-col gap-4 overflow-y-auto pr-1">
-            ${bubbles(s.lines)}
+          <p class="mb-3 flex items-center gap-2 text-base font-bold text-ink/55">
+            ${s.page}
+            <span class="rounded-full bg-grass px-2.5 py-0.5 text-xs font-bold text-white">Agent 已联通</span>
+          </p>
+          <div id="talk-list" class="flex flex-1 flex-col gap-4 overflow-y-auto pr-1">
+            ${bubbles()}
+            ${state.busy ? '<div class="flex items-center gap-2 text-ink/50"><span class="eq-bar idle h-5"></span><span class="eq-bar idle h-5"></span><span class="eq-bar idle h-5"></span> 外教回复中…</div>' : ''}
           </div>
+
+          ${pendingBadge('待接入')}
+          <span class="mt-1 text-xs text-ink/50">教材原声(Unit 3 MP3)与知识库资源暂不可达，此处显示真实 Agent/语音结果。</span>
 
           <!-- 键盘输入（点「键盘输入」时出现） -->
           <div id="keyboard-box" class="${state.showKeyboard ? '' : 'hidden'} mt-3">
-            <input id="key-input" type="text" placeholder="输入你想说的英语句子…"
-              class="w-full rounded-2xl border-2 border-grass-soft bg-white px-4 py-3 text-lg font-semibold text-ink outline-none focus:border-grass" />
+            <div class="flex gap-2">
+              <input id="key-input" type="text" placeholder="输入你想说的英语句子…"
+                class="w-full rounded-2xl border-2 border-grass-soft bg-white px-4 py-3 text-lg font-semibold text-ink outline-none focus:border-grass" />
+              <button data-send class="pressable shrink-0 rounded-2xl bg-grass px-5 text-lg font-extrabold text-white">发送</button>
+            </div>
           </div>
         </section>
       </div>
@@ -162,7 +198,7 @@ export function renderTalk(): string {
           </div>
         </div>
         <p class="mt-3 text-center text-base font-bold text-ink/55">
-          ${state.recording ? '正在聆听，再点一次麦克风结束录音…' : '点击麦克风，开始说英语'}
+          ${state.recording ? '正在聆听…再点一次麦克风结束并识别' : state.busy ? '外教正在回复…' : '点击麦克风，说出你的英语'}
         </p>
       </div>
     </main>
@@ -176,6 +212,48 @@ const chunks: BlobPart[] = [];
 function rerender(root: HTMLElement): void {
   root.innerHTML = renderTalk();
   bindTalk(root);
+  const list = document.getElementById('talk-list');
+  list?.scrollTo({ top: list.scrollHeight, behavior: 'smooth' });
+}
+
+/** WebM/WebAudio → wav(16bit PCM) base64，供后端 ASR 识别 */
+async function blobToWavBase64(blob: Blob): Promise<string> {
+  const arrayBuf = await blob.arrayBuffer();
+  const ctx = new AudioContext();
+  const audioBuf = await ctx.decodeAudioData(arrayBuf);
+  const samples = audioBuf.getChannelData(0);
+  const out = new Int16Array(samples.length);
+  for (let i = 0; i < samples.length; i++) {
+    const v = Math.max(-1, Math.min(1, samples[i]));
+    out[i] = v < 0 ? v * 0x8000 : v * 0x7fff;
+  }
+  const buffer = new ArrayBuffer(44 + out.length * 2);
+  const view = new DataView(buffer);
+  const writeStr = (off: number, str: string) => {
+    for (let i = 0; i < str.length; i++) view.setUint8(off + i, str.charCodeAt(i));
+  };
+  writeStr(0, 'RIFF');
+  view.setUint32(4, 36 + out.length * 2, true);
+  writeStr(8, 'WAVE');
+  writeStr(12, 'fmt ');
+  view.setUint32(16, 16, true);
+  view.setUint16(20, 1, true);
+  view.setUint16(22, 1, true);
+  view.setUint32(24, ctx.sampleRate, true);
+  view.setUint32(28, ctx.sampleRate * 2, true);
+  view.setUint16(32, 2, true);
+  view.setUint16(34, 16, true);
+  writeStr(36, 'data');
+  view.setUint32(40, out.length * 2, true);
+  new Int16Array(buffer, 44).set(out);
+  await ctx.close();
+  const bytes = new Uint8Array(buffer);
+  let bin = '';
+  const chunk = 0x8000;
+  for (let i = 0; i < bytes.length; i += chunk) {
+    bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
+  }
+  return btoa(bin);
 }
 
 export function bindTalk(root: HTMLElement): void {
@@ -185,6 +263,8 @@ export function bindTalk(root: HTMLElement): void {
     btn.addEventListener('click', () => {
       state.scene = SCENES.findIndex(sc => sc.key === btn.dataset.side);
       state.showKeyboard = false;
+      state.assistantAudio = '';
+      live = []; // 切换场景重置对话
       rerender(root);
     });
   });
@@ -192,64 +272,105 @@ export function bindTalk(root: HTMLElement): void {
   root.querySelectorAll<HTMLButtonElement>('[data-speak]').forEach(btn => {
     btn.addEventListener('click', () => {
       const i = Number(btn.dataset.speak);
-      speak(SCENES[state.scene].lines[i].en);
+      const lines = displayLines();
+      const text = lines[i]?.en;
+      if (!text) return;
+      // 用户句子用后端 TTS；教材/Agent 行若已有音频则播放，否则 TTS
+      if (lines[i].isUser) {
+        void synthesizeSpeech(text).then(r => playAudio(r.audioUri)).catch(() => toast('合成失败'));
+      } else if (i === displayLines().length - 1 && state.assistantAudio) {
+        playAudio(state.assistantAudio);
+      } else {
+        void synthesizeSpeech(text).then(r => playAudio(r.audioUri)).catch(() => toast('合成失败'));
+      }
     });
   });
 
   root.querySelector('[data-original]')?.addEventListener('click', () => {
-    toast('教材原声将在接入录音资源后启用', { pending: true });
+    toast('教材原声(Unit 3 MP3)资源当前不可达，未接入', { pending: true });
   });
 
   root.querySelector('[data-keyboard]')?.addEventListener('click', () => {
     state.showKeyboard = !state.showKeyboard;
     rerender(root);
-    if (state.showKeyboard) {
-      document.getElementById('key-input')?.focus();
-    }
+    if (state.showKeyboard) document.getElementById('key-input')?.focus();
   });
 
+  root.querySelector('[data-send]')?.addEventListener('click', () => submitKeyboard());
+  document.getElementById('key-input')?.addEventListener('keydown', e => {
+    if (e.key === 'Enter') submitKeyboard();
+  });
+
+  async function submitKeyboard(): Promise<void> {
+    const input = document.getElementById('key-input') as HTMLInputElement | null;
+    const v = (input?.value ?? '').trim();
+    if (!v) return;
+    if (input) input.value = '';
+    state.showKeyboard = false;
+    insertUserLine(v);
+    await recordTalk({ scene: SCENES[state.scene].key, role: 'user', text: v }).catch(() => toast('记录失败'));
+    rerender(root);
+    await runAgent(v, SCENES[state.scene].key);
+    rerender(root);
+    if (state.assistantAudio) playAudio(state.assistantAudio);
+  }
+
   root.querySelector('[data-replay]')?.addEventListener('click', () => {
-    speak(SCENES[state.scene].lines[0].en);
-    toast('重听：当前播放浏览器示例朗读，教材音频待接入', { pending: true });
+    if (state.assistantAudio) {
+      playAudio(state.assistantAudio);
+      toast('重听外教回复');
+    } else {
+      toast('还没有可重听的 Agent 回复，先说一句吧', { pending: true });
+    }
   });
 
   root.querySelector('[data-clear]')?.addEventListener('click', () => {
     state.showKeyboard = false;
-    if ('speechSynthesis' in window) window.speechSynthesis.cancel();
-    toast('已清空本轮练习');
+    state.assistantAudio = '';
+    live = [];
+    toast('已清空本轮对话');
     rerender(root);
   });
 
-  // 键盘提交：回车朗读输入内容（浏览器 TTS 演示）
-  document.getElementById('key-input')?.addEventListener('keydown', e => {
-    if (e.key === 'Enter') {
-      const v = (e.target as HTMLInputElement).value.trim();
-      if (v) {
-        speak(v);
-        toast('已朗读你的句子（浏览器示例 TTS）');
-      }
-    }
-  });
-
-  // 麦克风：真实录音采集，识别由待接入 ASR 完成
+  // 麦克风：录音 → WAV → 真实 ASR → Agent → TTS → 播放 + 记录
   root.querySelector('[data-mic]')?.addEventListener('click', async () => {
     if (state.recording && recorder && recorder.state !== 'inactive') {
       recorder.stop();
-      state.recording = false;
-      rerender(root);
+      return;
+    }
+    if (state.busy) {
+      toast('外教正在回复，请稍候');
       return;
     }
     try {
       stream = await navigator.mediaDevices.getUserMedia({ audio: true });
-      const mime = 'audio/webm';
-      recorder = new MediaRecorder(stream, { mimeType: mime });
+      const mime = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
+      recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
       chunks.length = 0;
       recorder.ondataavailable = ev => chunks.push(ev.data);
-      recorder.onstop = () => {
-        const blob = new Blob(chunks, { type: mime });
-        void URL.createObjectURL(blob);
+      recorder.onstop = async () => {
         stream?.getTracks().forEach(t => t.stop());
-        toast('已录下你的声音，ASR 识别将在接入 Agent 后启用', { pending: true });
+        state.recording = false;
+        const blob = new Blob(chunks, { type: mime || 'audio/webm' });
+        rerender(root);
+        try {
+          toast('正在识别你的声音…');
+          const base64 = await blobToWavBase64(blob);
+          const scene = SCENES[state.scene].key;
+          const { text } = await recognizeSpeech({ base64 });
+          if (!text || !text.trim()) {
+            toast('没有听清，再说一次好吗？', { pending: true });
+            return;
+          }
+          insertUserLine(text);
+          await recordTalk({ scene, role: 'user', text }).catch(() => toast('记录失败'));
+          rerender(root);
+          await runAgent(text, scene);
+          rerender(root);
+          if (state.assistantAudio) playAudio(state.assistantAudio);
+        } catch (e) {
+          toast(e instanceof Error ? `${e.message}` : '语音识别失败', { pending: true });
+        }
       };
       recorder.start();
       state.recording = true;

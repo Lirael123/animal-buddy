@@ -80,6 +80,8 @@ let live: Line[] = [];
 let lastFeedback: ChatResult | null = null;
 /** 每个场景是否已从服务端取过开场，避免重复初始化 */
 const initialized = new Set<string>();
+/** 正在拉取开场的场景（重入保护，防止 rerender→bindTalk→initScene 同步递归） */
+const initializing = new Set<string>();
 
 function insertUserLine(text: string): void {
   live.push({ speaker: 'me', en: text, isUser: true });
@@ -97,7 +99,11 @@ function insertAgentLine(reply: string, zh: string, fb?: ChatResult): void {
 
 /** 进入/重置场景：向服务端教学工作流取教材脚本的开场问题 */
 async function initScene(root: HTMLElement, sceneKey: string): Promise<void> {
-  if (initialized.has(sceneKey)) return;
+  // 重入保护：已完成或正在初始化的场景直接返回。
+  // 关键在于必须在首次 rerender() 之前同步置位——否则 rerender→bindTalk
+  // 会再次进入本函数，而 initialized 要等 await 返回才写入，导致同步无限递归爆栈卡死页面。
+  if (initialized.has(sceneKey) || initializing.has(sceneKey)) return;
+  initializing.add(sceneKey);
   state.starting = true;
   rerender(root);
   try {
@@ -111,6 +117,7 @@ async function initScene(root: HTMLElement, sceneKey: string): Promise<void> {
     initialized.add(sceneKey);
     toast(e instanceof Error ? `开场获取失败：${e.message}` : '开场获取失败', { pending: true });
   } finally {
+    initializing.delete(sceneKey);
     state.starting = false;
     rerender(root);
   }
@@ -371,6 +378,20 @@ async function blobToWavBase64(blob: Blob): Promise<string> {
   return btoa(bin);
 }
 
+/** 申请麦克风，带 8s 超时，避免权限请求在部分设备上既不 resolve 也不 reject 而卡死 */
+async function getMicStream(): Promise<MediaStream> {
+  if (!navigator.mediaDevices?.getUserMedia) {
+    throw new Error('当前浏览器不支持麦克风录音');
+  }
+  return new Promise<MediaStream>((resolve, reject) => {
+    const timer = setTimeout(() => reject(new Error('麦克风开启超时，请检查权限设置后重试')), 8000);
+    navigator.mediaDevices
+      .getUserMedia({ audio: true })
+      .then(s => { clearTimeout(timer); resolve(s); })
+      .catch(e => { clearTimeout(timer); reject(e); });
+  });
+}
+
 export function bindTalk(root: HTMLElement): void {
   bindShell(root);
 
@@ -495,7 +516,7 @@ export function bindTalk(root: HTMLElement): void {
       return;
     }
     try {
-      stream = await navigator.mediaDevices.getUserMedia({ audio: true });
+      stream = await getMicStream();
       const mime = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
       recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
       chunks.length = 0;
@@ -528,8 +549,10 @@ export function bindTalk(root: HTMLElement): void {
       recorder.start();
       state.recording = true;
       rerender(root);
-    } catch {
-      toast('请允许使用麦克风后再练习');
+    } catch (e) {
+      const msg = e instanceof Error ? e.message : '';
+      // NotAllowedError（拒绝/未授权）给权限引导；其它（超时/不支持）显示具体原因
+      toast(/denied|permission|allow/i.test(msg) ? '请允许使用麦克风后再练习' : msg || '麦克风开启失败，请重试', { pending: true });
     }
   });
 }

@@ -72,9 +72,32 @@ export interface HistoryItem {
   content: string;
 }
 
+/**
+ * 带超时的 fetch：默认 15s 自动中止，避免后端/网络挂起时 await 永不 resolve
+ * 把页面卡在 loading。AbortError 统一转成可读错误。
+ */
+async function fetchWithTimeout(
+  input: string,
+  init: RequestInit = {},
+  timeoutMs = 15000,
+): Promise<Response> {
+  const controller = new AbortController();
+  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  try {
+    return await fetch(input, { ...init, signal: controller.signal });
+  } catch (e) {
+    if (e instanceof DOMException && e.name === 'AbortError') {
+      throw new Error(`请求超时（${Math.round(timeoutMs / 1000)}s），请稍后重试`);
+    }
+    throw e;
+  } finally {
+    clearTimeout(timer);
+  }
+}
+
 /** 通用请求封装：转发给同源后端 */
 async function post<T>(path: string, body: Record<string, unknown>): Promise<T> {
-  const res = await fetch(path, {
+  const res = await fetchWithTimeout(path, {
     method: 'POST',
     headers: { 'Content-Type': 'application/json' },
     body: JSON.stringify(body),
@@ -154,7 +177,7 @@ export interface UnitAudioItem {
 /** 教材原声清单（真实 MP3，对象存储 + 动态签名 URL）—— 真实后端 */
 export async function fetchUnitAudioList(page?: number): Promise<UnitAudioItem[]> {
   const qs = page ? `?page=${page}` : '';
-  const res = await fetch(`/api/audio${qs}`);
+  const res = await fetchWithTimeout(`/api/audio${qs}`);
   const data = (await res.json()) as { items?: UnitAudioItem[]; error?: string };
   if (!res.ok || !Array.isArray(data.items)) {
     throw new Error(data.error || '获取教材原声清单失败');
@@ -164,7 +187,7 @@ export async function fetchUnitAudioList(page?: number): Promise<UnitAudioItem[]
 
 /** 单段教材原声（按 U03_xx id）—— 真实后端，返回可播放 url */
 export async function fetchUnitAudio(id: string): Promise<UnitAudioItem> {
-  const res = await fetch(`/api/audio/${encodeURIComponent(id)}`);
+  const res = await fetchWithTimeout(`/api/audio/${encodeURIComponent(id)}`);
   const data = (await res.json()) as UnitAudioItem & { error?: string };
   if (!res.ok || typeof data.url !== 'string') {
     throw new Error(data.error || '获取教材原声失败');
@@ -282,7 +305,7 @@ export async function fetchDictationAudio(qid: string): Promise<DictationAudioRe
 
 /** 获取自己的错题记录（服务端按 uid 过滤） */
 export async function fetchDictationRecords(): Promise<DictationRecordItem[]> {
-  const res = await fetch('/api/dictation/records?uid=animal-buddy-user');
+  const res = await fetchWithTimeout('/api/dictation/records?uid=animal-buddy-user');
   const data = (await res.json()) as { items?: DictationRecordItem[]; error?: string };
   if (!res.ok || !Array.isArray(data.items)) {
     throw new Error(data.error || '获取错题记录失败');
@@ -292,7 +315,7 @@ export async function fetchDictationRecords(): Promise<DictationRecordItem[]> {
 
 /** 获取学习进度（仅本人可读，服务端校验） */
 export async function fetchProgress(): Promise<ProgressSummary> {
-  const res = await fetch('/api/progress?uid=animal-buddy-user');
+  const res = await fetchWithTimeout('/api/progress?uid=animal-buddy-user');
   const data = (await res.json()) as ProgressSummary & { error?: string };
   if (!res.ok || data.exercised === undefined) {
     throw new Error(data.error || '获取学习进度失败');

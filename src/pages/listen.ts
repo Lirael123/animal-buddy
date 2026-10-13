@@ -186,6 +186,27 @@ export function renderListen(): string {
   </div>`;
 }
 
+/** 重新渲染前清空上一题输入，避免旧答案残留到新题目 */
+function clearInput(root: HTMLElement): void {
+  const old = root.querySelector<HTMLInputElement>('#listen-input');
+  if (old) old.value = '';
+}
+
+/**
+ * 统一的「换新题目」渲染：先清空旧输入 → 重新渲染 → 重新绑定；
+ * autoplay=true 时在渲染后自动播放当前题语音（教材原声 / TTS），
+ * 避免小朋友切题后听不到声音以为卡住。
+ */
+function rerender(root: HTMLElement, autoplay: boolean): void {
+  clearInput(root);
+  root.innerHTML = renderListen();
+  bindListen(root);
+  if (autoplay) {
+    const item = state.pool[state.index];
+    if (item) void playCurrent(item.id);
+  }
+}
+
 /** 提交当前题 */
 async function submitAnswer(root: HTMLElement): Promise<void> {
   if (state.answered) {
@@ -246,26 +267,23 @@ function nextQuestion(root: HTMLElement): void {
     // 开启新一轮 session
     sessionStorage.removeItem('ab-listen-session');
     state.session = '';
-    root.innerHTML = renderListen();
-    bindListen(root);
+    rerender(root, true);
     return;
   }
   state.index = next;
   state.answered = false;
   state.status = null;
-  root.innerHTML = renderListen();
-  bindListen(root);
+  rerender(root, true);
 }
 
 export function bindListen(root: HTMLElement): void {
   bindShell(root);
   ensureSession();
 
-  // 若题库未加载，先加载
+  // 若题库未加载，先加载；加载完成后渲染并自动播放第一题
   if (state.pool.length === 0) {
     loadPool(state.filter).then(() => {
-      root.innerHTML = renderListen();
-      bindListen(root);
+      rerender(root, true);
     });
   }
 
@@ -279,8 +297,8 @@ export function bindListen(root: HTMLElement): void {
       // 切换分类重新生成批次
       sessionStorage.removeItem('ab-listen-session');
       state.session = '';
-      root.innerHTML = renderListen();
-      bindListen(root);
+      // 先渲染空态并清空输入；题库加载完成后由 rerender 自动播放新分类第一题
+      rerender(root, false);
     });
   });
 
@@ -293,8 +311,7 @@ export function bindListen(root: HTMLElement): void {
   });
 
   root.querySelector<HTMLButtonElement>('[data-reload]')?.addEventListener('click', () => {
-    root.innerHTML = renderListen();
-    bindListen(root);
+    rerender(root, false);
   });
 
   root.querySelector<HTMLButtonElement>('[data-mic]')?.addEventListener('click', () => {

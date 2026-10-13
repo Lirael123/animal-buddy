@@ -4,13 +4,19 @@
 
 Animal Buddy Web：面向小学三年级（7~9 岁）的儿童英语口语互动应用（人教版三年级上册 Unit 3 *Our Animal Friends*）。
 
-后端能力联通状态：
+后端能力联通状态（第一阶段：My Pet 内置智能体已真实打通）：
 - ✅ **已真实联通**（后端 Express 路由 `server/routes/voice.ts` + `coze-coding-dev-sdk`）：
   - `/api/asr` 语音识别（英文）、`/api/tts` 语音合成（英文→mp3 URL）
-  - `/api/talk/record` 对话/纠错过程持久化（对象存储 JSON）
-- ⏸️ **原 Animal Buddy 智能体（教学 Agent，`server/agentClient.ts`）**：`/api/chat` 已从独立豆包模型切换为跨项目调用原智能体 `https://sf3vptr7j6.coze.site/stream_run`（SSE 按 sequence 拼接 + message_end 校验 + 会话隔离）。**缺 2 个服务端环境变量而尚未真正连通**：`ANIMAL_BUDDY_AGENT_TOKEN`（原 Agent API Token）、`ANIMAL_BUDDY_AGENT_PROJECT_ID`（原 Agent project_id）。未配置时 `/api/chat` 如实返回 502 错误，**绝不回退豆包**。
-- ❌ **仍未接入**（资源在本项目不可达，不伪造连接）：教材原声(Unit 3 MP3，对象存储无该资源)、Unit 3 知识库（本项目无教材数据）、学习记录聚合看板（数据库无业务表）。
-- 前端接口出口集中在 `src/api/client.ts`，真实链路已在 My Pet 场景的 Let's Talk 页打通。
+  - `/api/talk/start` 开启场景，返回 Rex 教材脚本开场问题
+  - `/api/chat` **内置教学智能体**（见下），返回结构化教学反馈
+  - `/api/talk/record` 对话/纠错过程持久化（对象存储 JSON，含 expected/correction）
+- 🧠 **内置 Animal Buddy 教学智能体架构（已取消跨项目 /stream_run 方案，不再依赖 `ANIMAL_BUDDY_AGENT_TOKEN`；弃用文件 `server/agentClient.ts` 已移除）**：
+  - 代码位于 `server/tutor/`：`curriculum.ts`（教材知识）、`prompt.ts`（系统提示词，蓝本 `assets/05_Agent系统提示词V2.txt`）、`workflow.ts`（教学工作流引擎 + 会话状态机）。
+  - **实现方式如实说明：不是平台 Knowledge/RAG**，而是把审核过的教材内容按 Part/页码/词汇/句型/对话脚本组织成**服务端结构化本地知识**（第一阶段仅 Unit 3 Part A P28-29 My Pet），严禁旧版 Amazing animals 内容。
+  - **服务端教学工作流掌控判定**：对话脚本、轮次推进、答案判定（教材原句/可接受表达/不完整/语法错误）、`I has → I have` 纠错、连续两次答错给教材句型示范，均为确定性逻辑；豆包 `doubao-seed-2-0-pro-260215` 仅负责把教学意图润色成适合三年级、可 TTS 的一句英文，**评分/推进/答案不交给模型自由决定**。
+  - 会话状态在服务端按 `uid::scene` 内存隔离；一次只问一个问题。
+- ❌ **仍未接入**（后续阶段，不伪造连接）：教材原声 10 段 MP3 的服务端播放（文件已在项目根 `assets/`，第二阶段接）、At the Zoo 场景工作流（第二阶段）、服务端固定题库听写/评分与错题/学习报告/教师端（第三阶段，届时移除前端答案）、学习记录聚合看板。
+- 前端接口出口集中在 `src/api/client.ts`；My Pet 的「选情境→AI 提问→语音回答→ASR→工作流分析→反馈/下一题→TTS→落库」全链路已在 Let's Talk 页真实打通。
 
 ## 技术栈
 
@@ -34,7 +40,8 @@ Animal Buddy Web：面向小学三年级（7~9 岁）的儿童英语口语互动
 │   ├── prepare.sh      # 预处理脚本
 │   └── start.sh        # 生产环境启动脚本
 ├── server/             # 服务端逻辑
-│   ├── routes/         # API 路由
+│   ├── routes/         # API 路由（voice.ts：asr/tts/talk/start/chat/talk record）
+│   ├── tutor/          # 内置教学智能体（curriculum 教材知识 / prompt 系统提示词 / workflow 工作流引擎）
 │   ├── server.ts       # Express 服务入口
 │   └── vite.ts         # Vite 中间件集成
 ├── src/                # 前端源码

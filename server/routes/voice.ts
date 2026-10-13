@@ -1,6 +1,6 @@
 import { Router } from 'express';
 import { Config, HeaderUtils, ASRClient, TTSClient, S3Storage } from 'coze-coding-dev-sdk';
-import { runAgentStream } from '../agentClient';
+import { runTutorTurn, startScene } from '../tutor/workflow';
 
 const router = Router();
 
@@ -62,32 +62,48 @@ router.post('/api/tts', async (req, res) => {
 });
 
 /**
- * 3. 教学 Agent：学生语音识别文本 → 原 Animal Buddy 智能体（跨项目 /stream_run）
+ * 3. 内置教学智能体（Animal Buddy Tutor）
  *
- * - 不再直接调用独立豆包模型；教学回复统一由原智能体产出。
- * - 同一学生(uid)+场景保持同一 session_id，不同学生会话隔离。
- * - 仅 Service 端持有 Token（ANIMAL_BUDDY_AGENT_TOKEN），前端不可见。
+ * 架构（已取消跨项目 /stream_run 方案，不再依赖 ANIMAL_BUDDY_AGENT_TOKEN）：
+ *   服务端教学工作流(server/tutor/workflow.ts)
+ *     ├─ 本地结构化教材知识(curriculum.ts，Unit 3 P28-29，非平台 RAG)
+ *     ├─ 确定性答案判定 / 轮次推进 / has→have 纠错
+ *     └─ 豆包 LLM：仅把教学意图润色成三年级水平的一句英文反馈
+ *
+ * 同一学生(uid)+场景在服务端维持会话状态机，不同学生相互隔离。
  */
-// 会话隔离：uid -> scene -> session_id
-const sessionStore = new Map<string, Map<string, string>>();
 
-function getSessionId(uid: string, scene: string): string {
-  const byScene = sessionStore.get(uid) ?? new Map<string, string>();
-  if (!sessionStore.has(uid)) sessionStore.set(uid, byScene);
-  let sid = byScene.get(scene);
-  if (!sid) {
-    // 新会话：用 uid + scene + 时间戳生成（不下发 token，仅作会话 key）
-    sid = `${uid.replace(/[^a-zA-Z0-9_-]/g, '')}-${scene}-${Date.now()}`;
-    byScene.set(scene, sid);
+/** 开启/重置某场景：返回 Rex 的开场问题（教材脚本第一问） */
+router.post('/api/talk/start', (req, res) => {
+  try {
+    const { scene, reset } = req.body as { scene?: string; reset?: boolean };
+    const uid = uidOf(req);
+    const sceneKey = scene ?? 'my-pet';
+    void reset; // startScene 本身会重建会话
+    const opened = startScene(uid, sceneKey);
+    res.json({
+      scene: opened.scene.key,
+      title: opened.scene.title,
+      opening: opened.opening,
+      openingZh: opened.openingZh,
+      round: opened.round,
+      page: opened.page,
+      engine: 'builtin-doubao-workflow',
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[talk/start] failed:', msg);
+    res.status(500).json({ error: 'start failed', detail: msg });
   }
-  return sid;
-}
+});
 
+/** 学生一轮回答（语音 ASR 文本或键盘文本）→ 工作流判定 + 豆包反馈 */
 router.post('/api/chat', async (req, res) => {
   try {
-    const { text, scene } = req.body as {
+    const { text, scene, reset, history } = req.body as {
       text?: string;
       scene?: string;
+      reset?: boolean;
       history?: { role: 'user' | 'assistant'; content: string }[];
     };
     if (!text || !text.trim()) {
@@ -95,34 +111,20 @@ router.post('/api/chat', async (req, res) => {
     }
     const uid = uidOf(req);
     const sceneKey = scene ?? 'my-pet';
-    const sessionId = getSessionId(uid, sceneKey);
 
-    const result = await runAgentStream(req, {
+    const feedback = await runTutorTurn(req, {
       uid,
       scene: sceneKey,
-      prompt: text.trim(),
-      sessionId,
+      text: text.trim(),
+      reset: Boolean(reset),
+      history: Array.isArray(history) ? history : [],
     });
 
-    if (!result.success) {
-      // 真实失败（鉴权/参数/超时/知识库未命中等）：如实返回错误，不回退豆包。
-      console.error(`[agent] ${result.detail} uid=${uid} scene=${sceneKey}`);
-      return res.status(502).json({
-        error: 'Animal Buddy Agent 调用失败',
-        detail: result.detail,
-        agentConfigured: false,
-      });
-    }
-
-    // 记录会话 id 到 store（原样返回），便于连续对话复用
-    const byScene = sessionStore.get(uid)!;
-    byScene.set(sceneKey, result.sessionId || sessionId);
-
-    res.json({ reply: result.reply, sessionId: result.sessionId || sessionId });
+    res.json(feedback);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error('[chat] failed:', msg);
-    res.status(502).json({ error: 'Agent reply failed', detail: msg });
+    res.status(502).json({ error: '内置教学智能体回复失败', detail: msg });
   }
 });
 

@@ -1,0 +1,24 @@
+{
+  "unit": "Unit 3 Our animal friends",
+  "source_zip": "新版教材.zip",
+  "page_range": "26-37",
+  "pages_count": 12,
+  "vocabulary_rows": 33,
+  "dictation_rows": 47,
+  "enabled_dictation_rows": 33,
+  "disabled_dictation_rows": 14,
+  "dialogue_scenarios": 2,
+  "models_audio_included": false,
+  "vocab_by_scope": {
+    "核心": 10,
+    "阅读重点": 4,
+    "听做活动": 5,
+    "教材拓展": 3,
+    "字母与发音": 7,
+    "拼读拓展": 4
+  },
+  "dictation_by_type": {
+    "word": 28,
+    "sentence": 19
+  }
+}

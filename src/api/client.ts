@@ -4,16 +4,21 @@
  * 状态说明（真实联通情况）：
  * --------------------------------------------------
  * ✅ 已真实接入（本云项目平台集成，后端 Express 路由 + coze-coding-dev-sdk）：
- *    - /api/asr   语音识别（英文）
- *    - /api/tts   语音合成（英文回复 → 可播放 mp3 URL）
- *    - /api/chat  Agent 回复（doubao 大模型，教材场景引导）
+ *    - /api/asr          语音识别（英文）
+ *    - /api/tts          语音合成（英文回复 → 可播放 mp3 URL）
+ *    - /api/talk/start   开启场景，返回 Rex 教材脚本开场问题
+ *    - /api/chat         内置教学智能体（服务端教学工作流 + 本地结构化教材知识 + 豆包生成反馈）
  *    - /api/talk/record  对话与纠错过程持久化（对象存储 JSON）
  *
- * ❌ 仍待接入（资源在本项目暂不可达，不伪造连接）：
- *    - 教材原声音频（Unit 3 的 MP3）——对象存储中不存在该资源
- *    - Unit 3 教材知识库       ——本项目知识库/数据库中无教材数据
- *    - 原 Agent 项目公共 API   ——localhost:9000/9001 不可跨项目访问
- *    - 学习记录聚合看板        ——数据库无业务表
+ * 内置智能体实现方式（如实说明，非平台 Knowledge/RAG）：
+ *    教材内容以服务端结构化数据（server/tutor/curriculum.ts，Unit 3 P28-29）组织，
+ *    由教学工作流做确定性判定/轮次推进/纠错，豆包模型只负责把教学意图润色成
+ *    适合三年级、可 TTS 的一句英文反馈。评分与推进不由模型自由决定。
+ *
+ * ❌ 仍待接入（第二/三阶段，不伪造连接）：
+ *    - 教材原声音频（Unit 3 的 10 段 MP3，assets/ 已就位，第二阶段接播放）
+ *    - At the Zoo 场景教学工作流（第二阶段）
+ *    - 服务端固定题库听写/评分、错题本、学习报告、教师端（第三阶段）
  * --------------------------------------------------
  */
 
@@ -25,8 +30,38 @@ export interface TTSResult {
   audioUri: string;
   audioSize: number;
 }
+
+export type TutorVerdict = 'correct' | 'incomplete' | 'incorrect';
+
+export interface TutorCorrection {
+  issue: string;
+  modelAnswer: string;
+  attempt: number;
+}
+
 export interface ChatResult {
   reply: string;
+  replyZh: string;
+  verdict: TutorVerdict;
+  round: number;
+  question: string;
+  sourceKind: 'textbook' | 'adapted';
+  page: number;
+  matchedPattern?: string;
+  correction?: TutorCorrection;
+  finished: boolean;
+  action: 'advance' | 'retry_hint' | 'retry_model' | 'finish';
+  engine: 'builtin-doubao-workflow';
+}
+
+export interface TalkStartResult {
+  scene: string;
+  title: string;
+  opening: string;
+  openingZh: string;
+  round: number;
+  page: number;
+  engine: 'builtin-doubao-workflow';
 }
 
 export interface HistoryItem {
@@ -62,13 +97,19 @@ export async function synthesizeSpeech(text: string): Promise<TTSResult> {
   return post<TTSResult>('/api/tts', { uid: 'animal-buddy-user', text });
 }
 
-/** Agent 回复：学生文本 / 识别文本 → 教材外教英文回复 —— 真实后端 */
+/** 开启/重置某场景：拿到 Rex 的教材脚本开场问题 —— 真实后端（不调模型，即时返回） */
+export async function startTalkScene(scene: string, reset = true): Promise<TalkStartResult> {
+  return post<TalkStartResult>('/api/talk/start', { uid: 'animal-buddy-user', scene, reset });
+}
+
+/** 内置教学智能体：学生文本/识别文本 → 工作流判定 + 三年级英文反馈 —— 真实后端 */
 export async function askAgent(
   text: string,
   scene: string,
   history: HistoryItem[],
+  reset = false,
 ): Promise<ChatResult> {
-  return post<ChatResult>('/api/chat', { uid: 'animal-buddy-user', text, scene, history });
+  return post<ChatResult>('/api/chat', { uid: 'animal-buddy-user', text, scene, history, reset });
 }
 
 /** 记录对话/纠错过程 —— 真实后端（对象存储持久化） */

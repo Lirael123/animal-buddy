@@ -1,0 +1,91 @@
+{
+  "version": "v2",
+  "scenarios": [
+    {
+      "id": "pet_dialogue",
+      "title": "My pet / 宠物交流",
+      "source_pages": [
+        28,
+        29
+      ],
+      "source_text_verified": true,
+      "target": "运用 Do you have a pet? / Yes, I do. / No, I don't. / I have a cat. / I like your dog. 等教材句型沟通",
+      "dialogue_steps": [
+        {
+          "role": "AI",
+          "utterance": "Good morning! Do you have a pet?",
+          "classification": "教学改编",
+          "source": "p28主题与句型组合，非教材原句逐句复刻"
+        },
+        {
+          "role": "learner",
+          "expected": [
+            "Yes, I do.",
+            "No, I don't."
+          ],
+          "classification": "教材原句可用"
+        },
+        {
+          "role": "AI",
+          "utterance": "What pet do you have?",
+          "classification": "教学扩展，不是本单元已确认原句"
+        },
+        {
+          "role": "learner",
+          "expected": [
+            "I have a cat.",
+            "I have a dog."
+          ],
+          "classification": "p28出现"
+        }
+      ],
+      "max_rounds": 5,
+      "error_strategy": "先轻提示后给句型示例，错两次逐字示范"
+    },
+    {
+      "id": "zoo_dialogue",
+      "title": "At the zoo / 动物园对话",
+      "source_pages": [
+        31,
+        32
+      ],
+      "source_text_verified": true,
+      "target": "Let's go to the zoo! / What's this? / What's that? / It's a fox. / It's a red panda. / It's an elephant.",
+      "dialogue_steps": [
+        {
+          "role": "AI",
+          "utterance": "Let's go to the zoo!",
+          "classification": "p31教材原句"
+        },
+        {
+          "role": "learner",
+          "expected": [
+            "Great!"
+          ],
+          "classification": "p31教材原句"
+        },
+        {
+          "role": "AI",
+          "utterance": "What's this?",
+          "classification": "p31教材原句"
+        },
+        {
+          "role": "learner",
+          "expected": [
+            "It's a fox.",
+            "It's a panda.",
+            "It's an elephant."
+          ],
+          "classification": "对应动物图片后决定答案，不能随意标注正确"
+        },
+        {
+          "role": "AI",
+          "utterance": "What's that?",
+          "classification": "p31教材原句"
+        }
+      ],
+      "max_rounds": 5,
+      "error_strategy": "图片指示this/that必须与当前画面一致，若无图片则不对指示代词作视觉真实性判断"
+    }
+  ]
+}

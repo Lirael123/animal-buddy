@@ -1,13 +1,25 @@
 import { ASSETS } from '../assets';
 import { toast, pendingBadge, playAudio } from '../components/ui';
 import { topBar, sideMenu, bindShell, type SideItem } from '../components/shell';
-import { recognizeSpeech, synthesizeSpeech, askAgent, recordTalk } from '../api/client';
+import {
+  recognizeSpeech,
+  synthesizeSpeech,
+  askAgent,
+  startTalkScene,
+  recordTalk,
+  type ChatResult,
+  type TutorVerdict,
+} from '../api/client';
 
 interface Line {
   speaker: 'rex' | 'me';
   en: string;
   zh?: string;
   isUser?: boolean;
+  /** Rex 行携带的结构化教学反馈（来自内置工作流） */
+  verdict?: TutorVerdict;
+  page?: number;
+  modelAnswer?: string;
 }
 interface Scene {
   key: string;
@@ -17,7 +29,10 @@ interface Scene {
   page: string;
   img: string;
   caption: string;
-  lines: Line[];
+  /** 服务端开场接口失败时的本地兜底第一问 */
+  openingFallback: string;
+  /** 内置教学工作流是否已开放（第一阶段仅 My Pet 真实可用） */
+  tutorEnabled: boolean;
 }
 
 const SCENES: Scene[] = [
@@ -29,11 +44,8 @@ const SCENES: Scene[] = [
     page: 'P28　Part A　Let’s talk',
     img: ASSETS.scenePet,
     caption: 'Do you have a pet?',
-    lines: [
-      { speaker: 'rex', en: 'Hi! Do you have a pet?' },
-      { speaker: 'me', en: 'Yes, I do.', isUser: true },
-      { speaker: 'rex', en: 'Great! What pet do you have?' },
-    ],
+    openingFallback: 'Good morning! Do you have a pet?',
+    tutorEnabled: true,
   },
   {
     key: 'zoo',
@@ -43,11 +55,8 @@ const SCENES: Scene[] = [
     page: 'P31　Part B　Let’s talk',
     img: ASSETS.sceneZoo,
     caption: 'What can we see at the zoo?',
-    lines: [
-      { speaker: 'rex', en: 'Look! What animal is it?' },
-      { speaker: 'me', en: "It's a giraffe. It's so tall!", isUser: true },
-      { speaker: 'rex', en: "And that's a panda. How cute!" },
-    ],
+    openingFallback: 'Look! What animal is it?',
+    tutorEnabled: false, // 第二阶段开放
   },
 ];
 
@@ -55,21 +64,54 @@ const state = {
   scene: 0,
   recording: false,
   showKeyboard: false,
-  busy: false, // Agent 回复中
-  assistantAudio: '', // 最近一次 Agent 回复的 TTS 音频 URL（用于重听）
+  busy: false, // 智能体回复中
+  starting: false, // 正在向服务端取开场问题
+  assistantAudio: '', // 最近一次智能体回复的 TTS 音频 URL（用于重听）
 };
 
-/** 动态对话历史：用教材预置 + 学生/Agent 真实回合 */
+/** 动态对话历史：开场问题 + 学生/智能体真实回合 */
 let live: Line[] = [];
+/** 最近一次结构化教学反馈（用于学习反馈区） */
+let lastFeedback: ChatResult | null = null;
+/** 每个场景是否已从服务端取过开场，避免重复初始化 */
+const initialized = new Set<string>();
 
 function insertUserLine(text: string): void {
   live.push({ speaker: 'me', en: text, isUser: true });
 }
-function insertAgentLine(text: string): void {
-  live.push({ speaker: 'rex', en: text });
+function insertAgentLine(reply: string, zh: string, fb?: ChatResult): void {
+  live.push({
+    speaker: 'rex',
+    en: reply,
+    zh: zh || undefined,
+    verdict: fb?.verdict,
+    page: fb?.page,
+    modelAnswer: fb?.correction?.modelAnswer,
+  });
 }
 
-/** 把语音 / 文本送去 Agent，得到英语回复并转语音 */
+/** 进入/重置场景：向服务端教学工作流取教材脚本的开场问题 */
+async function initScene(root: HTMLElement, sceneKey: string): Promise<void> {
+  if (initialized.has(sceneKey)) return;
+  state.starting = true;
+  rerender(root);
+  try {
+    const opened = await startTalkScene(sceneKey, true);
+    live = [{ speaker: 'rex', en: opened.opening, zh: opened.openingZh, page: opened.page }];
+    initialized.add(sceneKey);
+  } catch (e) {
+    // 取不到开场时退回脚本内置第一问，保证页面可练；错误如实提示
+    const fallback = SCENES.find(s => s.key === sceneKey)?.openingFallback ?? 'Do you have a pet?';
+    live = [{ speaker: 'rex', en: fallback, page: 28 }];
+    initialized.add(sceneKey);
+    toast(e instanceof Error ? `开场获取失败：${e.message}` : '开场获取失败', { pending: true });
+  } finally {
+    state.starting = false;
+    rerender(root);
+  }
+}
+
+/** 把语音 / 文本送去内置教学智能体，得到判定 + 英语反馈并转语音 */
 async function runAgent(text: string, scene: string): Promise<void> {
   if (state.busy) return;
   state.busy = true;
@@ -77,17 +119,60 @@ async function runAgent(text: string, scene: string): Promise<void> {
     .filter(l => l.en)
     .map(l => ({ role: l.speaker === 'rex' ? 'assistant' : 'user', content: l.en }));
   try {
-    toast('外教正在组织回复…');
-    const { reply } = await askAgent(text, scene, history);
-    insertAgentLine(reply);
-    const audio = await synthesizeSpeech(reply);
+    toast('Rex 正在听你的回答…');
+    const fb = await askAgent(text, scene, history);
+    lastFeedback = fb;
+    insertAgentLine(fb.reply, fb.replyZh, fb);
+    const audio = await synthesizeSpeech(fb.reply);
     state.assistantAudio = audio.audioUri;
-    await recordTalk({ scene, role: 'assistant', text: reply });
+    await recordTalk({
+      scene,
+      role: 'assistant',
+      text: fb.reply,
+      expected: fb.matchedPattern || fb.question,
+      correction: fb.correction ? `${fb.correction.issue}｜示范：${fb.correction.modelAnswer}` : undefined,
+    });
   } catch (e) {
-    toast(e instanceof Error ? e.message : 'Agent 回复失败', { pending: true });
+    toast(e instanceof Error ? e.message : '智能体回复失败', { pending: true });
   } finally {
     state.busy = false;
   }
+}
+
+/** 学习反馈卡：正误 / 轮次 / 教材页码 / 纠错提示 */
+function feedbackCard(): string {
+  if (!lastFeedback) {
+    return `
+      <div class="mt-3 rounded-2xl bg-white/80 px-4 py-3 ring-1 ring-black/5">
+        <p class="text-base font-bold text-ink/70">🌟 学习反馈</p>
+        <p class="mt-1 text-sm text-ink/55">对着麦克风回答 Rex 的问题，这里会给出判定、小提示和教材页码。</p>
+      </div>`;
+  }
+  const fb = lastFeedback;
+  const ok = fb.verdict === 'correct';
+  const badge = ok
+    ? '<span class="rounded-full bg-grass px-3 py-1 text-sm font-extrabold text-white">✅ 说得好</span>'
+    : fb.verdict === 'incorrect'
+      ? '<span class="rounded-full bg-orange px-3 py-1 text-sm font-extrabold text-white">✏️ 再试一次</span>'
+      : '<span class="rounded-full bg-wood px-3 py-1 text-sm font-extrabold text-ink">💡 补全句子</span>';
+  const correctionBlock = fb.correction
+    ? `
+      <p class="mt-2 text-sm font-semibold text-ink/80">${fb.correction.issue}</p>
+      ${fb.correction.attempt >= 2 ? `<p class="mt-1 text-sm font-extrabold text-grass-dark">跟读示范：${fb.correction.modelAnswer}</p>` : ''}`
+    : '';
+  const sourceLabel = fb.sourceKind === 'textbook' ? '教材原句' : '教材句型表达';
+  return `
+  <div class="mt-3 rounded-2xl bg-white/90 px-4 py-3 shadow-sm ring-1 ring-black/5">
+    <div class="flex flex-wrap items-center gap-2">
+      <p class="text-base font-extrabold text-ink/80">🌟 学习反馈</p>
+      ${badge}
+      <span class="rounded-full bg-mint-pale px-3 py-1 text-xs font-bold text-ink/70">第 ${fb.round} 轮</span>
+      <span class="rounded-full bg-sky-pale px-3 py-1 text-xs font-bold text-ink/70">P${fb.page} · ${sourceLabel}</span>
+      ${fb.finished ? '<span class="rounded-full bg-grass px-3 py-1 text-xs font-extrabold text-white">本轮完成 🎉</span>' : ''}
+    </div>
+    ${fb.replyZh ? `<p class="mt-2 text-sm font-semibold text-ink/75">${fb.replyZh}</p>` : ''}
+    ${correctionBlock}
+  </div>`;
 }
 
 function eqBars(n: number, idle = false): string {
@@ -97,11 +182,24 @@ function eqBars(n: number, idle = false): string {
 }
 
 function displayLines(): Line[] {
-  return live.length ? live : SCENES[state.scene].lines;
+  return live;
+}
+
+function verdictTag(l: Line): string {
+  if (!l.verdict) return '';
+  if (l.verdict === 'correct') return '<span class="mr-1 text-grass">✅</span>';
+  if (l.verdict === 'incorrect') return '<span class="mr-1 text-orange">✏️</span>';
+  return '<span class="mr-1 text-wood">💡</span>';
 }
 
 function bubbles(): string {
-  return displayLines()
+  const lines = displayLines();
+  if (!lines.length) {
+    return `<div class="grid flex-1 place-items-center text-ink/45">
+      <p class="text-lg font-bold">${state.starting ? 'Rex 正在准备问题…' : '点击下方麦克风开始和 Rex 对话'}</p>
+    </div>`;
+  }
+  return lines
     .map((l, i) => {
       const rex = l.speaker === 'rex';
       return `
@@ -109,8 +207,9 @@ function bubbles(): string {
         <img src="${rex ? ASSETS.bunnyHero : ASSETS.avatarBoy}" alt="" class="h-11 w-11 shrink-0 rounded-full object-cover ring-2 ring-white shadow-sm" loading="lazy" width="44" height="44" />
         <div class="flex ${rex ? '' : 'flex-row-reverse'} items-center gap-2">
           <div class="max-w-[78%] rounded-3xl ${rex ? 'rounded-tl-md bg-white' : 'rounded-tr-md bg-sky-pale'} px-4 py-2.5 shadow-sm">
-            <p class="text-xl font-bold leading-snug text-ink">${l.en}</p>
-            ${l.zh ? `<p class="mt-0.5 text-sm text-ink/45">${l.zh}</p>` : ''}
+            <p class="text-xl font-bold leading-snug text-ink">${verdictTag(l)}${l.en}</p>
+            ${l.zh ? `<p class="mt-0.5 text-sm text-ink/55">${l.zh}</p>` : ''}
+            ${l.page ? `<p class="mt-1 text-xs font-semibold text-ink/35">Unit 3 · P${l.page}</p>` : ''}
           </div>
           <button data-speak="${i}" class="pressable grid h-9 w-9 shrink-0 place-items-center rounded-full bg-grass text-white shadow-sm">🔊</button>
         </div>
@@ -152,17 +251,19 @@ export function renderTalk(): string {
 
         <!-- 右侧：对话 -->
         <section class="flex min-h-[420px] flex-1 flex-col rounded-[1.75rem] bg-gradient-to-b from-sky-pale to-mint-pale p-4 shadow-card ring-1 ring-black/5 sm:p-5">
-          <p class="mb-3 flex items-center gap-2 text-base font-bold text-ink/55">
+          <p class="mb-3 flex flex-wrap items-center gap-2 text-base font-bold text-ink/55">
             ${s.page}
-            <span class="rounded-full bg-grass px-2.5 py-0.5 text-xs font-bold text-white">Agent 已联通</span>
+            ${s.tutorEnabled
+              ? '<span class="rounded-full bg-grass px-2.5 py-0.5 text-xs font-bold text-white">内置智能体已联通</span>'
+              : '<span class="rounded-full bg-orange px-2.5 py-0.5 text-xs font-bold text-white">第二阶段开放</span>'}
+            <span class="rounded-full bg-mint-pale px-2.5 py-0.5 text-xs font-bold text-ink/60">ASR · TTS 真实语音</span>
           </p>
           <div id="talk-list" class="flex flex-1 flex-col gap-4 overflow-y-auto pr-1">
             ${bubbles()}
-            ${state.busy ? '<div class="flex items-center gap-2 text-ink/50"><span class="eq-bar idle h-5"></span><span class="eq-bar idle h-5"></span><span class="eq-bar idle h-5"></span> 外教回复中…</div>' : ''}
+            ${state.busy ? '<div class="flex items-center gap-2 text-ink/50"><span class="eq-bar idle h-5"></span><span class="eq-bar idle h-5"></span><span class="eq-bar idle h-5"></span> Rex 思考中…</div>' : ''}
           </div>
 
-          ${pendingBadge('待接入')}
-          <span class="mt-1 text-xs text-ink/50">教材原声(Unit 3 MP3)与知识库资源暂不可达，此处显示真实 Agent/语音结果。</span>
+          ${s.tutorEnabled ? feedbackCard() : pendingBadge('At the Zoo 场景教学工作流第二阶段接入')}
 
           <!-- 键盘输入（点「键盘输入」时出现） -->
           <div id="keyboard-box" class="${state.showKeyboard ? '' : 'hidden'} mt-3">
@@ -261,13 +362,22 @@ export function bindTalk(root: HTMLElement): void {
 
   root.querySelectorAll<HTMLButtonElement>('[data-side]').forEach(btn => {
     btn.addEventListener('click', () => {
-      state.scene = SCENES.findIndex(sc => sc.key === btn.dataset.side);
+      const idx = SCENES.findIndex(sc => sc.key === btn.dataset.side);
+      if (idx === state.scene) return;
+      state.scene = idx;
       state.showKeyboard = false;
       state.assistantAudio = '';
+      lastFeedback = null;
       live = []; // 切换场景重置对话
       rerender(root);
+      const sc = SCENES[state.scene];
+      if (sc.tutorEnabled) void initScene(root, sc.key);
     });
   });
+
+  // 首次进入：拉取 My Pet 教材脚本开场问题（服务端工作流初始化会话）
+  const initialScene = SCENES[state.scene];
+  if (initialScene.tutorEnabled) void initScene(root, initialScene.key);
 
   root.querySelectorAll<HTMLButtonElement>('[data-speak]').forEach(btn => {
     btn.addEventListener('click', () => {
@@ -327,9 +437,14 @@ export function bindTalk(root: HTMLElement): void {
   root.querySelector('[data-clear]')?.addEventListener('click', () => {
     state.showKeyboard = false;
     state.assistantAudio = '';
+    lastFeedback = null;
     live = [];
-    toast('已清空本轮对话');
+    const sc = SCENES[state.scene];
+    // 允许重新开始：清除初始化标记，重新向服务端取开场（服务端会重建会话状态机）
+    initialized.delete(sc.key);
+    toast('已重新开始本场景对话');
     rerender(root);
+    if (sc.tutorEnabled) void initScene(root, sc.key);
   });
 
   // 麦克风：录音 → WAV → 真实 ASR → Agent → TTS → 播放 + 记录

@@ -27,7 +27,7 @@ export type ErrorType =
   | 'mismatch' // 内容与当前问题不匹配（答非所问）
   | 'incomplete' // 说得不完整，能理解但需补全
   | 'asr_empty' // ASR 空结果 / 未识别到有效语音（不算知识错误）
-  | 'asr_low_conf' // ASR 低置信度结果（不算知识错误，需复核）
+  | 'unclear_transcript' // 转写文本模糊/过短，无法可靠判定（据转写内容启发式判断，非读取真实置信度）
   | 'none';
 
 export interface TutorFeedback {
@@ -120,15 +120,25 @@ function evaluateAnswer(raw: string, turn: DialogueTurn): Evaluation {
   const n = normalize(raw);
   if (!n) return { verdict: 'incomplete', sourceKind: 'adapted', errorType: 'asr_empty' };
 
-  // 优先级最高：硬性语法错误（如 I has ...），即使句子里含正确词汇也必须先拦下纠错。
-  const hardIssue = detectHardGrammarError(n);
-  if (hardIssue) {
-    return { verdict: 'incorrect', sourceKind: 'adapted', issue: hardIssue, errorType: 'grammar' };
+  // 优先级最高：先判是否已答对当前题（含合理变式），再做错误分类。
+  // —— 这样避免"学生已答对但句子另有小瑕疵"被打回，也避免语法硬规则抢跑。
+  if (missingDefiniteArticleOnly(n, turn)) {
+    return {
+      verdict: 'correct',
+      matched: 'acceptable',
+      sourceKind: 'adapted',
+      errorType: 'none',
+    };
   }
-
   const textbookHit = matches(n, turn.expectedPatterns);
   if (textbookHit) {
     return { verdict: 'correct', matched: textbookHit, sourceKind: 'textbook', errorType: 'none' };
+  }
+
+  // 明确语法错误（I has 等）优先于"裸词子串命中"，避免把语法错的句子误判为正确。
+  const hardIssue = detectHardGrammarError(n, turn);
+  if (hardIssue) {
+    return { verdict: 'incorrect', sourceKind: 'adapted', issue: hardIssue, errorType: 'grammar' };
   }
 
   const acceptHit = matches(n, turn.acceptablePatterns);
@@ -162,12 +172,79 @@ function evaluateAnswer(raw: string, turn: DialogueTurn): Evaluation {
   };
 }
 
-/** 硬性语法错误：三年级明确要纠正的点（第一阶段：I has → I have） */
-function detectHardGrammarError(normalized: string): string | null {
-  if (/\bi has\b/.test(normalized)) {
+/**
+ * 硬语法错误：学生只要说出 "I has"，即明确属于三年级要纠正的语法点（have/has 混用），
+ * 任何轮次都优先拦截。示范会由 jointGrammarModel 结合"学生已说的动物词 + 本轮句型"生成，
+ * 既针对实际错误，又保证与当前题目一致（不会出现 Zoo 第一轮却示范 I have... 的脱节）。
+ */
+function detectHardGrammarError(normalized: string, _turn: DialogueTurn): string | null {
+  if (/\bi has\b/i.test(normalized)) {
     return '说“我有……”的时候，I（我）后面要用 have，不能用 has。';
   }
   return null;
+}
+
+/**
+ * 联合纠错示范：把学生原话里的具体语法错误修正好，再套用本轮句型，
+ * 保证"示范与当前题目一致"且"针对学生实际错误"，不混用其它轮次句式。
+ *
+ * 例：
+ *  - My Pet round2 学生说 "I has a cat" → "I have a cat."（has→have + 沿用 cat）
+ *  - Zoo round1 学生说 "I sees a monkey" → "I see a monkey."（用本轮 I see... 句型）
+ *  - Zoo round3 学生说 "It is very big." → 属可接受变式，不进入本函数
+ */
+function jointGrammarModel(raw: string, turn: DialogueTurn): string {
+  const s = raw.trim().replace(/[.!?]+$/, '');
+  const pet = /(dog|cat|fish|bird|rabbit)s?/i.exec(s);
+  const zoo = /(panda|monkey|tiger|elephant|lion)s?/i.exec(s);
+
+  // A) 本轮是 "I have a + 宠物"（My Pet round2）→ 转成 I have a + 宠物（含 has→have 修正）
+  if (/\bi have a/i.test(turn.expectedPatterns.join(' '))) {
+    const word = pet ? pet[1].toLowerCase() : 'dog';
+    return `I have a ${word}.`;
+  }
+
+  // B) Zoo 动物识别轮（round1 I see... / round2 It's... / round4 I like...）
+  const isSee = /i see a/i.test(turn.expectedPatterns.join(' '));
+  const isIts = /it's a|it is a/i.test(turn.expectedPatterns.join(' '));
+  const isLike = /i like the/i.test(turn.expectedPatterns.join(' '));
+  const wordRaw = zoo ?? pet;
+  if (isSee && wordRaw) {
+    const w = wordRaw[1].toLowerCase();
+    return `I see ${/^[aeiou]/.test(w) ? 'an' : 'a'} ${w}.`;
+  }
+  if (isIts && wordRaw) {
+    const w = wordRaw[1].toLowerCase();
+    return `It's ${/^[aeiou]/.test(w) ? 'an' : 'a'} ${w}.`;
+  }
+  if (isLike && wordRaw) {
+    return `I like the ${wordRaw[1].toLowerCase()}.`;
+  }
+
+  // C) 兜底：本轮教材例句（与当前轮次一致）
+  return turn.modelAnswer;
+}
+
+/**
+ * 仅缺无 the/a/an（可数名词单数前缺限定词）时，语义正确 —— 三年级合理变式，判可接受。
+ * 例：Zoo 里 "I see panda" → 可接受（adapted），不判错。
+ */
+function missingDefiniteArticleOnly(normalized: string, turn: DialogueTurn): boolean {
+  const zoo = ['panda', 'monkey', 'tiger', 'elephant', 'lion'];
+  const pets = ['dog', 'cat', 'fish', 'bird', 'rabbit'];
+  const words = [...zoo, ...pets].map(w => `(?:${w}s?|an? ${w})`);
+  const anyAnimal = new RegExp(`(^|\\s)(${words.join('|')})(\\s|$)`, 'i');
+  if (!anyAnimal.test(normalized)) return false;
+  // 已含确定/不定冠词 → 不算"缺限定词"
+  if (/the| a | an /i.test(normalized)) return false;
+  // Zoo 动物识别轮：I see panda / It is tiger / likes panda 等语义正确
+  if ((turn.page === 32 || turn.page === 33) && zoo.some(w => new RegExp(`\\b${w}s?\\b`, 'i').test(normalized))) {
+    return true;
+  }
+  if ((turn.page === 28 || turn.page === 29) && pets.some(w => new RegExp(`\\b${w}s?\\b`, 'i').test(normalized))) {
+    return true;
+  }
+  return false;
 }
 
 /** 词汇错误：出现了教材范围外的动物/宠物词，与本题无关 → 属于词汇用错 */
@@ -316,10 +393,12 @@ export async function runTutorTurn(req: Request, input: RunInput): Promise<Tutor
   let correction: TutorFeedback['correction'] | undefined;
   let finished = false;
 
-  // ASR 空结果 / 低置信度：绝不当作知识错误，不扣分、不推进，只温和请其重说一遍
+  // ASR 空结果 / 转写模糊：绝不当作知识错误，不扣分、不推进，只温和请其重说一遍
+  // 说明：ASR（/api/asr）只返回 text+duration，不提供真实 confidence，
+  // 故"转写模糊"是基于转写文本的启发式判断（unclear_transcript），如实标注，不冒充真实置信度。
   let asrNote: string | undefined;
-  if (evaluation.errorType === 'asr_empty' || asrLowConfidence(input.text)) {
-    asrNote = '未识别到清晰的有效语音，本次不计入正确或错误。';
+  if (evaluation.errorType === 'asr_empty' || isUnclearTranscript(input.text)) {
+    asrNote = '转写文本过短或不够清晰，本次不计入正确或错误。';
     state.updatedAt = Date.now();
     action = 'retry_hint';
     correction = {
@@ -364,17 +443,24 @@ export async function runTutorTurn(req: Request, input: RunInput): Promise<Tutor
 
     if (attempt >= 2) {
       action = 'retry_model';
+      // 联合纠错示范：对语法错误，示范 = 修正学生原话中的错误并套用本轮句型；
+      // 否则用教材例句 turn.modelAnswer（保证与当前轮次一致，不混用其它轮次）。
+      const modelForCorrection =
+        evaluation.errorType === 'grammar'
+          ? jointGrammarModel(input.text, turn)
+          : turn.modelAnswer;
       correction = {
         issue: evaluation.issue ?? turn.focus,
-        modelAnswer: turn.modelAnswer,
+        modelAnswer: modelForCorrection,
         attempt,
       };
       instruction =
         `孩子这一轮连续 ${attempt} 次没有说对，他的原话是："${input.text}"。` +
+        `本轮问题："${turn.ask}"。` +
         `请先温和地让他听示范，再请他跟读，只说一句英文，` +
-        `要包含教材句型示范："${turn.modelAnswer}"。` +
-        `例如可以说 "Listen: ${turn.modelAnswer} Now you say it!"。不要讲新内容、不要追问。`;
-      replyZh = `小提示：${evaluation.issue ?? turn.focus} 听一听，我们一起读：${turn.modelAnswer}`;
+        `要包含与本题一致、且已修正错误的示范："${modelForCorrection}"。` +
+        `例如可以说 "Listen: ${modelForCorrection} Now you say it!"。不要讲新内容、不要追问。`;
+      replyZh = `小提示：${evaluation.issue ?? turn.focus} 听一听，我们一起读：${modelForCorrection}`;
     } else {
       action = 'retry_hint';
       correction = {
@@ -414,7 +500,7 @@ export async function runTutorTurn(req: Request, input: RunInput): Promise<Tutor
     correction,
     finished,
     action,
-    errorType: asrNote ? (evaluation.errorType === 'asr_empty' ? 'asr_empty' : 'asr_low_conf') : evaluation.errorType,
+    errorType: asrNote ? (evaluation.errorType === 'asr_empty' ? 'asr_empty' : 'unclear_transcript') : evaluation.errorType,
     asrNote,
     engine: 'builtin-doubao-workflow',
   };
@@ -429,13 +515,18 @@ function errorTypeLabel(t: ErrorType): string {
     case 'mismatch': return '与当前问题不匹配';
     case 'incomplete': return '表达不够完整';
     case 'asr_empty': return '未识别到语音';
-    case 'asr_low_conf': return '识别置信度过低';
+    case 'unclear_transcript': return '转写不够清晰，暂无法判定';
     default: return '需补全';
   }
 }
 
-/** ASR 低置信度 / 空结果的粗略判定（文本过短或明显像未识别 segments） */
-function asrLowConfidence(text: string): boolean {
+/**
+ * 转写是否"模糊/不可用"的启发式判断。
+ * 诚实说明：ASR 接口不返回真实置信度，这里仅依据转写文本本身（过短、纯符号、
+ * 或只有疑似噪音的单字母）判断无法可靠判定，命名 unclear_transcript 以如实标注，
+ * 不与"读取真实置信度"混淆。
+ */
+function isUnclearTranscript(text: string): boolean {
   const t = text.trim();
   if (!t) return true;
   // 识别结果常见占位（如 "。"、单字、或纯标点）

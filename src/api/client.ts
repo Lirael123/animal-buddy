@@ -52,7 +52,7 @@ export interface ChatResult {
   correction?: TutorCorrection;
   finished: boolean;
   action: 'advance' | 'retry_hint' | 'retry_model' | 'finish';
-  errorType?: 'grammar' | 'word' | 'mismatch' | 'incomplete' | 'asr_empty' | 'asr_low_conf' | 'none';
+  errorType?: 'grammar' | 'word' | 'mismatch' | 'incomplete' | 'asr_empty' | 'unclear_transcript' | 'none';
   asrNote?: string;
   engine: 'builtin-doubao-workflow';
 }

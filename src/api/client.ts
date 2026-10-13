@@ -9,14 +9,15 @@
  *    - /api/talk/start   开启场景，返回 Rex 教材脚本开场问题
  *    - /api/chat         内置教学智能体（服务端教学工作流 + 本地结构化教材知识 + 豆包生成反馈）
  *    - /api/talk/record  对话与纠错过程持久化（对象存储 JSON）
+ *    - /api/audio        教材原声（Unit 3 的 10 段真实 MP3，对象存储 + 动态签名 URL）
  *
  * 内置智能体实现方式（如实说明，非平台 Knowledge/RAG）：
- *    教材内容以服务端结构化数据（server/tutor/curriculum.ts，Unit 3 P28-29）组织，
+ *    教材内容以服务端结构化数据（server/tutor/curriculum.ts，Unit 3 P26-P37）组织，
  *    由教学工作流做确定性判定/轮次推进/纠错，豆包模型只负责把教学意图润色成
  *    适合三年级、可 TTS 的一句英文反馈。评分与推进不由模型自由决定。
+ *    教材原声音频为对象存储中的真实 MP3（audio.ts 清单，播放前动态签名），非 TTS 替代。
  *
  * ❌ 仍待接入（第二/三阶段，不伪造连接）：
- *    - 教材原声音频（Unit 3 的 10 段 MP3，assets/ 已就位，第二阶段接播放）
  *    - At the Zoo 场景教学工作流（第二阶段）
  *    - 服务端固定题库听写/评分、错题本、学习报告、教师端（第三阶段）
  * --------------------------------------------------
@@ -123,14 +124,36 @@ export async function recordTalk(entry: {
   await post<{ ok: boolean }>('/api/talk/record', { uid: 'animal-buddy-user', ...entry });
 }
 
-/**
- * 教材原声：待接入。
- * 现有 Unit 3 教材音频（MP3）在本云端对象存储中不存在，且原 Agent 项目的
- * localhost:9000/9001 不可作为公共地址访问，因此此处不返回任何伪造音频。
- */
-export async function fetchTextbookAudio(sceneId: string): Promise<string> {
-  void sceneId;
-  throw new Error(
-    '[待接入] 教材原声音频资源在当前项目中不可用：对象存储中未发现 Unit 3 教材 MP3，需提供该资源的访问授权/地址后接入。',
-  );
+export interface UnitAudioItem {
+  id: string;
+  page: number;
+  part: 'A' | 'B' | 'C';
+  activity: string;
+  fileName: string;
+  storageKey: string;
+  url: string | null;
+  textVerified: 'verified' | 'pending';
+  answerVerified: 'verified' | 'pending';
+  matchStatus: string;
+}
+
+/** 教材原声清单（真实 MP3，对象存储 + 动态签名 URL）—— 真实后端 */
+export async function fetchUnitAudioList(page?: number): Promise<UnitAudioItem[]> {
+  const qs = page ? `?page=${page}` : '';
+  const res = await fetch(`/api/audio${qs}`);
+  const data = (await res.json()) as { items?: UnitAudioItem[]; error?: string };
+  if (!res.ok || !Array.isArray(data.items)) {
+    throw new Error(data.error || '获取教材原声清单失败');
+  }
+  return data.items;
+}
+
+/** 单段教材原声（按 U03_xx id）—— 真实后端，返回可播放 url */
+export async function fetchUnitAudio(id: string): Promise<UnitAudioItem> {
+  const res = await fetch(`/api/audio/${encodeURIComponent(id)}`);
+  const data = (await res.json()) as UnitAudioItem & { error?: string };
+  if (!res.ok || typeof data.url !== 'string') {
+    throw new Error(data.error || '获取教材原声失败');
+  }
+  return data;
 }

@@ -7,6 +7,7 @@ import {
   askAgent,
   startTalkScene,
   recordTalk,
+  fetchUnitAudioList,
   type ChatResult,
   type TutorVerdict,
 } from '../api/client';
@@ -33,6 +34,8 @@ interface Scene {
   openingFallback: string;
   /** 内置教学工作流是否已开放（第一阶段仅 My Pet 真实可用） */
   tutorEnabled: boolean;
+  /** 本场景可播放的教材原声（audio.ts 的 U03_xx id，真实 MP3） */
+  audioIds: string[];
 }
 
 const SCENES: Scene[] = [
@@ -46,6 +49,7 @@ const SCENES: Scene[] = [
     caption: 'Do you have a pet?',
     openingFallback: 'Good morning! Do you have a pet?',
     tutorEnabled: true,
+    audioIds: ['U03_03', 'U03_01', 'U03_02'],
   },
   {
     key: 'zoo',
@@ -57,6 +61,7 @@ const SCENES: Scene[] = [
     caption: 'What can we see at the zoo?',
     openingFallback: 'Look! What animal is it?',
     tutorEnabled: false, // 第二阶段开放
+    audioIds: ['U03_07', 'U03_08'], // 实际播放仍受对象存储原声可用性约束
   },
 ];
 
@@ -396,8 +401,31 @@ export function bindTalk(root: HTMLElement): void {
     });
   });
 
-  root.querySelector('[data-original]')?.addEventListener('click', () => {
-    toast('教材原声(Unit 3 MP3)资源当前不可达，未接入', { pending: true });
+  root.querySelector('[data-original]')?.addEventListener('click', async () => {
+    const scene = SCENES[state.scene];
+    const ids = scene.audioIds ?? [];
+    if (!ids.length) {
+      toast('本场景暂无教材原声', { pending: true });
+      return;
+    }
+    if (state.busy) return;
+    state.busy = true;
+    rerender(root);
+    try {
+      // 真实教材原声：从对象存储动态签名，播放第一段（对应本场景主栏目原声）
+      const audios = await fetchUnitAudioList();
+      const target = ids.map(id => audios.find(a => a.id === id)).find((a): a is NonNullable<typeof a> => Boolean(a && a.url));
+      if (!target || !target.url) {
+        throw new Error('未找到可播放的教材原声片段');
+      }
+      playAudio(target.url);
+      toast(`正在播放教材原声《${target.activity}》·P${target.page}`);
+    } catch (e) {
+      toast(`教材原声播放失败：${e instanceof Error ? e.message : '未知错误'}`, { pending: true });
+    } finally {
+      state.busy = false;
+      rerender(root);
+    }
   });
 
   root.querySelector('[data-keyboard]')?.addEventListener('click', () => {

@@ -1,19 +1,21 @@
 /**
- * Unit 3《Our animal friends》本地结构化教材知识源（第一阶段：My Pet）。
+ * Unit 3《Our animal friends》本地结构化教材知识源（第二阶段 2A：全单元 p26-p37 文本 + 教材原声清单）。
  *
  * 实现方式如实说明：
  * - 这里【不是】平台 Knowledge/RAG 检索，而是把审核过的教材内容按
  *   Part / 页码 / 词汇 / 句型 / 对话脚本组织成服务端结构化数据，
  *   由教学工作流精确注入给内置模型，杜绝旧版 "Amazing animals" 内容混入。
- * - 所有句子均来自 assets/01_教材知识库_核对版.md 中标注为「教材可见原文」的条目；
- *   标记 kind：
+ * - 文本依据：assets/01_教材知识库_核对版.md 与 assets/08_教材页码核对索引.csv（均标「已核对原图」）。
+ * - 标记 kind：
  *     textbook  = 教材可见原文（可作为评分依据）
  *     adapted   = 教学改编（用于引导/鼓励，不作为学生必须复述的答案）
- *
- * 第二阶段会扩充为 Part A/B/C 全单元（p26-p37）并接入教材 MP3。
+ * - 音频对应：assets/说明文档.md + server/tutor/audio.ts（10 段真实 MP3，见 UNIT_AUDIO）。
+ *   音频的文字逐字核验/听力答案核验均为「未完成」，一律标 pending，绝不据文件名伪造原声文字/答案。
+ * - 拼音/字母发音等未核验的答案统一进「待核验」区，禁止进入自动评分。
  */
 
 export type SentenceKind = 'textbook' | 'adapted';
+export type VerificationState = 'verified' | 'pending';
 
 /** 教材句型/词条 */
 export interface CurriculumItem {
@@ -146,4 +148,138 @@ export const SCENES: Record<string, SceneScript> = {
   'my-pet': MY_PET_SCENE,
   // 前端场景 key 'pet' 与历史数据兼容
   pet: MY_PET_SCENE,
+};
+
+/* =========================================================================
+ * 第二阶段 2A 追加：全单元结构化知识源（p26–p37）
+ * 文本已核对原图（assets/01 + 08）；音频对应见 server/tutor/audio.ts
+ * ========================================================================= */
+
+/** 词汇分层（资产 assets/02_词汇分层表.csv，33 词） */
+export type VocabScope = '核心' | '阅读重点' | '听做活动' | '教材拓展' | '字母与发音' | '拼读拓展';
+
+export interface VocabularyItem {
+  word: string;
+  zh: string;
+  section: string;
+  page: number;
+  scope: VocabScope;
+  /** 是否可用于听写评分：仅核心/阅读重点经审核后可用，其余标 false */
+  scorable: boolean;
+}
+
+/** 全单元词汇（严格取自 assets/02_词汇分层表.csv） */
+export const UNIT_VOCABULARY: VocabularyItem[] = [
+  // 核心（P29 宠物 / P32 野生动物），可评分
+  { word: 'dog', zh: '狗', section: 'Part A Let’s learn', page: 29, scope: '核心', scorable: true },
+  { word: 'cat', zh: '猫', section: 'Part A Let’s learn', page: 29, scope: '核心', scorable: true },
+  { word: 'fish', zh: '鱼', section: 'Part A Let’s learn', page: 29, scope: '核心', scorable: true },
+  { word: 'bird', zh: '鸟', section: 'Part A Let’s learn', page: 29, scope: '核心', scorable: true },
+  { word: 'rabbit', zh: '兔子', section: 'Part A Let’s learn', page: 29, scope: '核心', scorable: true },
+  { word: 'panda', zh: '熊猫', section: 'Part B Let’s learn', page: 32, scope: '核心', scorable: true },
+  { word: 'monkey', zh: '猴子', section: 'Part B Let’s learn', page: 32, scope: '核心', scorable: true },
+  { word: 'tiger', zh: '老虎', section: 'Part B Let’s learn', page: 32, scope: '核心', scorable: true },
+  { word: 'elephant', zh: '大象', section: 'Part B Let’s learn', page: 32, scope: '核心', scorable: true },
+  { word: 'lion', zh: '狮子', section: 'Part B Let’s learn', page: 32, scope: '核心', scorable: true },
+  // 阅读重点（P33 Start to read）
+  { word: 'big', zh: '大的', section: 'Part B Start to read', page: 33, scope: '阅读重点', scorable: true },
+  { word: 'small', zh: '小的', section: 'Part B Start to read', page: 33, scope: '阅读重点', scorable: true },
+  { word: 'tall', zh: '高的', section: 'Part B Start to read', page: 33, scope: '阅读重点', scorable: true },
+  { word: 'fast', zh: '快的', section: 'Part B Start to read', page: 33, scope: '阅读重点', scorable: true },
+  // 听做活动动作（P29 Listen and do）
+  { word: 'run', zh: '跑', section: 'Part A Listen and do', page: 29, scope: '听做活动', scorable: false },
+  { word: 'sleep', zh: '睡觉', section: 'Part A Listen and do', page: 29, scope: '听做活动', scorable: false },
+  { word: 'sing', zh: '唱歌', section: 'Part A Listen and do', page: 29, scope: '听做活动', scorable: false },
+  { word: 'hop', zh: '单脚跳/蹦跳', section: 'Part A Listen and do', page: 29, scope: '听做活动', scorable: false },
+  { word: 'swim', zh: '游泳', section: 'Part A Listen and do', page: 29, scope: '听做活动', scorable: false },
+  // 教材拓展（非 B 部分核心五词）
+  { word: 'fox', zh: '狐狸', section: 'Part B Dialogue / Reading', page: 31, scope: '教材拓展', scorable: false },
+  { word: 'red panda', zh: '小熊猫', section: 'Part B Dialogue / Reading', page: 31, scope: '教材拓展', scorable: false },
+  { word: 'giraffe', zh: '长颈鹿', section: 'Part B Dialogue / Reading', page: 33, scope: '教材拓展', scorable: false },
+  // 字母与发音（P30 Letters and sounds，义为辅助解释）
+  { word: 'ill', zh: '生病的', section: 'Letters and sounds', page: 30, scope: '字母与发音', scorable: false },
+  { word: 'kid', zh: '小孩', section: 'Letters and sounds', page: 30, scope: '字母与发音', scorable: false },
+  { word: 'job', zh: '工作', section: 'Letters and sounds', page: 30, scope: '字母与发音', scorable: false },
+  { word: 'jet', zh: '喷气式飞机', section: 'Letters and sounds', page: 30, scope: '字母与发音', scorable: false },
+  { word: 'Kim', zh: '人名Kim', section: 'Letters and sounds', page: 30, scope: '字母与发音', scorable: false },
+  { word: 'kite', zh: '风筝', section: 'Letters and sounds', page: 30, scope: '字母与发音', scorable: false },
+  { word: 'leg', zh: '腿', section: 'Letters and sounds', page: 30, scope: '字母与发音', scorable: false },
+  // 拼读拓展（仅拼读，不建议三年级首轮听写）
+  { word: 'dig', zh: '挖', section: 'Can you read the words?', page: 30, scope: '拼读拓展', scorable: false },
+  { word: 'Jim', zh: '人名Jim', section: 'Can you read the words?', page: 30, scope: '拼读拓展', scorable: false },
+  { word: 'lab', zh: '实验室', section: 'Can you read the words?', page: 30, scope: '拼读拓展', scorable: false },
+  { word: 'led', zh: 'lead的过去式', section: 'Can you read the words?', page: 30, scope: '拼读拓展', scorable: false },
+];
+
+/** 页码 → 栏目汇总（assets/08，已核对原图） */
+export interface PageSection { page: number; section: string; content: string; }
+
+export const PAGE_SECTIONS: PageSection[] = [
+  { page: 26, section: 'Unit overview', content: '单元封面' },
+  { page: 27, section: 'Look and think / Listen and chant', content: '导入、单元主题与韵文' },
+  { page: 28, section: "Part A Let's talk / Do a survey", content: '宠物交流与调查（含 My Pet 对话场景）' },
+  { page: 29, section: "Part A Let's learn / Listen and do", content: '宠物词汇（dog/cat/fish/bird/rabbit）与动作' },
+  { page: 30, section: 'Part A Letters and sounds', content: '字母 Ii/Jj/Kk/Ll 和音素练习；听音选择无原声答案' },
+  { page: 31, section: "Part B Let's talk / Play with hand shadows", content: '野生动物对话（fox/red panda 情境，非 p32 核心五词）、手影' },
+  { page: 32, section: "Part B Let's learn / Listen and chant", content: '五个重点野生动物词 panda/monkey/tiger/elephant/lion' },
+  { page: 33, section: 'Part B Start to read', content: '动物特征与归类；词表含 bird,cat,dog,elephant,fish,giraffe,lion,monkey,panda,rabbit,tiger' },
+  { page: 34, section: 'Part C Project: Make an animal picture book', content: '项目任务第 1、2 步；第 1 步无音频答案（P34 Listen and circle 未核验不评分）' },
+  { page: 35, section: 'Part C Project / Self-check', content: '项目制作与自评' },
+  { page: 36, section: 'Reading time', content: '拓展阅读第一部分' },
+  { page: 37, section: 'Reading time', content: '拓展阅读第二部分' },
+];
+
+/** 字母训练范围（P30，08 索引已核对） */
+export const LETTERS_A: string[] = ['Ii', 'Jj', 'Kk', 'Ll'];
+
+/**
+ * 易错表达与纠错建议（受教材范围约束）。
+ * 用于教学工作流在学生答错时给出确定性纠错 + 豆包润色提示，不改变标准答案与评分。
+ */
+export interface MisuseRule {
+  /** 触发错误原串（规范化小写） */
+  error: string;
+  /** 正确表达（规范化小写） */
+  correct: string;
+  /** 一句话中文纠错建议（三年级可懂） */
+  hintZh: string;
+  /** 教材示范（规范化小写，须来自课本原句） */
+  textbookDemo: string;
+  page: number;
+  part: 'A' | 'B' | 'C';
+}
+
+export const MISUSE_RULES: MisuseRule[] = [
+  {
+    error: 'i has', correct: 'i have',
+    hintZh: '说“我有……”的时候，I 后面要用 have，不能用 has。',
+    textbookDemo: 'yes i do. i have a cat.', page: 28, part: 'A',
+  },
+  {
+    error: 'a elephant', correct: 'an elephant',
+    hintZh: 'elephant 是元音音素开头，要说 an elephant；元音音素前用 an，辅音音素前用 a。',
+    textbookDemo: "it's an elephant.", page: 32, part: 'B',
+  },
+  {
+    error: 'an dog', correct: 'a dog',
+    hintZh: 'dog 是辅音音素开头，要说 a dog，不能说 an dog。',
+    textbookDemo: 'yes i do. i have a dog.', page: 28, part: 'A',
+  },
+];
+
+/** 场景 → 应关联的教材原声（audio.ts 的 UNIT_AUDIO id） */
+export const SCENE_AUDIO_IDS: Record<string, string[]> = {
+  'my-pet': ['U03_01', 'U03_02', 'U03_03'],
+  pet: ['U03_01', 'U03_02', 'U03_03'],
+  // At the Zoo 场景第二阶段实现时启用：['U03_07','U03_08','U03_09']
+};
+
+/* =========================================================================
+ * 待核验区（严禁进入自动评分 / 原声文字展示）
+ * ========================================================================= */
+export const PENDING_NOTES = {
+  audio: '10 段教材 MP3 已上传对象存储并在 audio.ts 建清单，但录音文字逐字核验与听力答案核验均为未完成，不得据文件名伪造原声文字或听力答案。',
+  p30FirstSound: 'P30 Listen and circle the first sound 无核对后的标准答案，不参与自动评分。',
+  p34ListenCircle: 'P34 Listen and circle 未核验答案前不参与自动评分。',
+  u0304u0305: 'U03_04 与 U03_05 标题相同但时长差异大，需试听核对后确定其包含内容。',
 };

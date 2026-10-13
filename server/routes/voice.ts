@@ -1,6 +1,7 @@
 import { Router } from 'express';
 import { Config, HeaderUtils, ASRClient, TTSClient, S3Storage } from 'coze-coding-dev-sdk';
 import { runTutorTurn, startScene } from '../tutor/workflow';
+import { UNIT_AUDIO, getUnitAudio } from '../tutor/audio';
 
 const router = Router();
 
@@ -167,6 +168,80 @@ router.post('/api/talk/record', async (req, res) => {
     const msg = e instanceof Error ? e.message : String(e);
     console.error('[talk/record] failed:', msg);
     res.status(500).json({ error: 'record failed', detail: msg });
+  }
+});
+
+/**
+ * 5. 教材原声（Unit 3，真实对象存储 MP3，非 TTS）
+ *
+ * - GET /api/audio            → 全量清单（元信息 + 动态可播 URL）
+ * - GET /api/audio/:id        → 单段教材原声（U03_xx）
+ * - GET /api/audio?page=28    → 按页码取该页教材原声
+ *
+ * 播放链接由 generatePresignedUrl 动态生成（短期），前端必须直接播放返回的可播 URL。
+ * 文本/答案逐字核验状态沿用 assets/说明文档.md：未完成的一律标 pending，不得编造。
+ */
+router.get('/api/audio', async (req, res) => {
+  try {
+    const page = Number((req.query as { page?: string }).page ?? NaN);
+    const source = Number.isInteger(page) && page > 0 ? UNIT_AUDIO.filter((a) => a.page === page) : UNIT_AUDIO;
+
+    const storage = new S3Storage({});
+    const signed = [];
+    for (const a of source) {
+      let url: string | null = null;
+      try {
+        url = await storage.generatePresignedUrl({ key: a.storageKey, expireTime: 3600 });
+      } catch {
+        url = null;
+      }
+      signed.push({
+        id: a.id,
+        page: a.page,
+        part: a.part,
+        activity: a.activity,
+        fileName: a.fileName,
+        storageKey: a.storageKey,
+        url,
+        textVerified: a.textVerified,
+        answerVerified: a.answerVerified,
+        matchStatus: a.matchStatus,
+      });
+    }
+    res.json({ engine: 'object-storage', count: signed.length, items: signed });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[audio] list failed:', msg);
+    res.status(502).json({ error: 'audio list failed', detail: msg });
+  }
+});
+
+router.get('/api/audio/:id', async (req, res) => {
+  try {
+    const id = String(req.params.id);
+    const audio = getUnitAudio(id);
+    if (!audio) {
+      return res.status(404).json({ error: `no such audio ${id}` });
+    }
+    const storage = new S3Storage({});
+    const url = await storage.generatePresignedUrl({ key: audio.storageKey, expireTime: 3600 });
+    res.json({
+      id: audio.id,
+      page: audio.page,
+      part: audio.part,
+      activity: audio.activity,
+      fileName: audio.fileName,
+      storageKey: audio.storageKey,
+      url,
+      textVerified: audio.textVerified,
+      answerVerified: audio.answerVerified,
+      matchStatus: audio.matchStatus,
+      engine: 'object-storage',
+    });
+  } catch (e) {
+    const msg = e instanceof Error ? e.message : String(e);
+    console.error('[audio] get failed:', msg);
+    res.status(502).json({ error: 'audio get failed', detail: msg });
   }
 });
 

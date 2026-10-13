@@ -252,8 +252,9 @@ export async function runTutorTurn(req: Request, input: RunInput): Promise<Tutor
     if (nextTurn) {
       action = 'advance';
       instruction =
-        `孩子这一轮答对了（${turn.round === 1 ? '回答了 Do you have a pet?' : '说出了宠物相关表达'}）。` +
-        `请先用一句非常简短的英语鼓励（如 Great!/Well done!），然后自然地问出下面这【唯一一个】问题：\n` +
+        `孩子这一轮答对了，他的原话是："${input.text}"。` +
+        `请先用一句非常简短、贴合他回答的英语鼓励（例如针对他说了的宠物/动作稍作回应，如 Great!/Well done!/So cute!），` +
+        `然后自然地问出下面这【唯一一个】问题：\n` +
         `"${nextTurn.ask}"\n` +
         `只输出这一轮该说的那一句英文，不要追加其它问题。`;
       replyZh = '';
@@ -263,7 +264,7 @@ export async function runTutorTurn(req: Request, input: RunInput): Promise<Tutor
       finished = true;
       instruction =
         '孩子已经完成 My Pet 宠物对话的全部练习，都说得很好。请用一句简短、温暖的英语表扬并收尾' +
-        '（可提到他的宠物，例如 “Great talking with you! See you next time!”），不要再提出新问题。';
+        '（可提到他提到的宠物/表达，例如 “Great talking with you! See you next time!”），不要再提出新问题。';
     }
   } else {
     // incorrect / incomplete：同一题累计，不推进
@@ -279,7 +280,8 @@ export async function runTutorTurn(req: Request, input: RunInput): Promise<Tutor
         attempt,
       };
       instruction =
-        `孩子这一轮连续 ${attempt} 次没有说对。请先温和地让他听示范，再请他跟读，只说一句英文，` +
+        `孩子这一轮连续 ${attempt} 次没有说对，他的原话是："${input.text}"。` +
+        `请先温和地让他听示范，再请他跟读，只说一句英文，` +
         `要包含教材句型示范："${turn.modelAnswer}"。` +
         `例如可以说 "Listen: ${turn.modelAnswer} Now you say it!"。不要讲新内容、不要追问。`;
       replyZh = `小提示：${evaluation.issue ?? turn.focus} 听一听，我们一起读：${turn.modelAnswer}`;
@@ -291,11 +293,20 @@ export async function runTutorTurn(req: Request, input: RunInput): Promise<Tutor
         attempt,
       };
       instruction =
-        `孩子这一轮没有说对，但这是第一次，请不要直接给答案。用一句非常简短、温和的英文请他再试一次` +
-        `（围绕问题 "${turn.ask}"），不要重复一长串、不要提出新问题。可以说 "Try again, please." 之类。`;
+        `孩子这一轮没有说对（第一次，不要直接给答案），他的原话是："${input.text}"，` +
+        `中文提示为：${evaluation.issue ?? turn.focus}。` +
+        `请针对他这句话里的那个小问题，用一句非常简短、温和的英文引导他再试一次` +
+        `（围绕问题 "${turn.ask}"，可顺着他已说对的词靠近，但不要把答案整句说出来），` +
+        `不要重复一长串、不要提出新问题。可以说 "Try again, please." 之类。`;
       replyZh = `小提示：${evaluation.issue ?? turn.focus}`;
     }
   }
+
+  // 强制约束：无论哪个分支，模型都只能把教学意图润色成一句英文；
+  // 标准答案、页码、判定结果（verdict）与评分一律以服务端工作流为准，模型不得改。
+  instruction +=
+    '\n【硬性约束】你只负责输出这一轮单句英文教学话术（可配极简中文 replyZh）。' +
+    '严禁自行给出/改变教材标准答案、页码或本题判定结果；不得引入教材外的词、不得跳题、不得加问句。';
 
   const generated = await generateReply(req, scene, instruction, input.history);
   // 中文提示以工作流判定为准（模型只负责英文），保证纠错信息确定可控

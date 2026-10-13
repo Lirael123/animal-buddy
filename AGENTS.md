@@ -4,19 +4,22 @@
 
 Animal Buddy Web：面向小学三年级（7~9 岁）的儿童英语口语互动应用（人教版三年级上册 Unit 3 *Our Animal Friends*）。
 
-后端能力联通状态（第一阶段：My Pet 内置智能体已真实打通）：
+后端能力联通状态（第一阶段 My Pet 内置智能体 + 第二阶段 2A 教材知识源与教材原声已真实打通）：
 - ✅ **已真实联通**（后端 Express 路由 `server/routes/voice.ts` + `coze-coding-dev-sdk`）：
   - `/api/asr` 语音识别（英文）、`/api/tts` 语音合成（英文→mp3 URL）
   - `/api/talk/start` 开启场景，返回 Rex 教材脚本开场问题
   - `/api/chat` **内置教学智能体**（见下），返回结构化教学反馈
   - `/api/talk/record` 对话/纠错过程持久化（对象存储 JSON，含 expected/correction）
+  - `/api/audio`、`/api/audio/:id` **教材原声**（Unit 3 的 10 段真实 MP3，对象存储 `audio/unit/` + 动态签名 URL，非 TTS）
 - 🧠 **内置 Animal Buddy 教学智能体架构（已取消跨项目 /stream_run 方案，不再依赖 `ANIMAL_BUDDY_AGENT_TOKEN`；弃用文件 `server/agentClient.ts` 已移除）**：
-  - 代码位于 `server/tutor/`：`curriculum.ts`（教材知识）、`prompt.ts`（系统提示词，蓝本 `assets/05_Agent系统提示词V2.txt`）、`workflow.ts`（教学工作流引擎 + 会话状态机）。
-  - **实现方式如实说明：不是平台 Knowledge/RAG**，而是把审核过的教材内容按 Part/页码/词汇/句型/对话脚本组织成**服务端结构化本地知识**（第一阶段仅 Unit 3 Part A P28-29 My Pet），严禁旧版 Amazing animals 内容。
-  - **服务端教学工作流掌控判定**：对话脚本、轮次推进、答案判定（教材原句/可接受表达/不完整/语法错误）、`I has → I have` 纠错、连续两次答错给教材句型示范，均为确定性逻辑；豆包 `doubao-seed-2-0-pro-260215` 仅负责把教学意图润色成适合三年级、可 TTS 的一句英文，**评分/推进/答案不交给模型自由决定**。
+  - 代码位于 `server/tutor/`：`curriculum.ts`（教材知识，已扩为 Unit 3 P26-P37 全单元）、`audio.ts`（10 段原声清单）、`prompt.ts`（系统提示词，蓝本 `assets/05_Agent系统提示词V2.txt`）、`workflow.ts`（教学工作流引擎 + 会话状态机）。
+  - **实现方式如实说明：不是平台 Knowledge/RAG**，而是把审核过的教材内容（依据 `assets/01_教材知识库_核对版.md`、`08_教材页码核对索引.csv`，均「已核对原图」）按 Part/页码/词汇/句型/对话脚本组织成**服务端结构化本地知识**（Unit 3 P26-P37 全量：核心词、阅读重点、动作、字母 Ii-Jj-Kk-Ll、易错纠错表、音频映射），严禁旧版 Amazing animals 内容。
+  - **服务端教学工作流掌控判定**：对话脚本、轮次推进、答案判定（教材原句/可接受表达/不完整/语法错误）、`I has → I have` 纠错、连续两次答错给教材句型示范，均为确定性逻辑；豆包 `doubao-seed-2-0-pro-260215` 仅负责把教学意图润色成适合三年级、可 TTS 的一句英文，**评分/推进/页码/答案不交给模型自由决定**。
+  - **差异化反馈**（第二阶段 2A 增强）：豆包会针对学生本轮具体原话生成个性化英文引导（如顺着他已说对的词靠近正确答案），但只改语言、不改标准答案/页码/判定/评分。
   - 会话状态在服务端按 `uid::scene` 内存隔离；一次只问一个问题。
-- ❌ **仍未接入**（后续阶段，不伪造连接）：教材原声 10 段 MP3 的服务端播放（文件已在项目根 `assets/`，第二阶段接）、At the Zoo 场景工作流（第二阶段）、服务端固定题库听写/评分与错题/学习报告/教师端（第三阶段，届时移除前端答案）、学习记录聚合看板。
-- 前端接口出口集中在 `src/api/client.ts`；My Pet 的「选情境→AI 提问→语音回答→ASR→工作流分析→反馈/下一题→TTS→落库」全链路已在 Let's Talk 页真实打通。
+- 📖 **教材原声**（`server/tutor/audio.ts` + `assets/说明文档.md`）：10 段 MP3 已本地 `assets/` 且已真实上传对象存储 `audio/unit/`（持久化 storageKey，播放前 `generatePresignedUrl` 动态签名）。**录音文字逐字核验、听力答案核验均为「未完成」**，一律标 `pending`，不得据文件名伪造原声文字/答案；P30 first sound、P34 Listen and circle 未核验答案不参与评分。
+- ❌ **仍未接入**（后续阶段，不伪造连接）：At the Zoo 场景工作流（第二阶段）、其余教材原声在 Let's Talk 之外的整段播放面板、服务端固定题库听写/评分与错题/学习报告/教师端（第三阶段，届时移除前端答案）、学习记录聚合看板。
+- 前端接口出口集中在 `src/api/client.ts`；My Pet 的「选情境→AI 提问→语音回答→ASR→工作流分析→反馈/下一题→TTS→落库」全链路与「听教材原声」已在 Let's Talk 页真实打通。
 
 ## 技术栈
 

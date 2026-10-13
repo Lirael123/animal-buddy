@@ -56,12 +56,12 @@ const SCENES: Scene[] = [
     emoji: '🦒',
     title: 'At the Zoo',
     sub: '动物园',
-    page: 'P31　Part B　Let’s talk',
+    page: 'P32　Part B　Let’s learn / P33',
     img: ASSETS.sceneZoo,
-    caption: 'What can we see at the zoo?',
-    openingFallback: 'Look! What animal is it?',
-    tutorEnabled: false, // 第二阶段开放
-    audioIds: ['U03_07', 'U03_08'], // 实际播放仍受对象存储原声可用性约束
+    caption: 'Look! What animal is it?',
+    openingFallback: 'Hello! What animals do you see at the zoo?',
+    tutorEnabled: true, // 第二阶段 2B 已接入真实工作流
+    audioIds: ['U03_07', 'U03_08', 'U03_09'],
   },
 ];
 
@@ -136,6 +136,11 @@ async function runAgent(text: string, scene: string): Promise<void> {
       text: fb.reply,
       expected: fb.matchedPattern || fb.question,
       correction: fb.correction ? `${fb.correction.issue}｜示范：${fb.correction.modelAnswer}` : undefined,
+      errorType: fb.errorType,
+      round: fb.round,
+      page: fb.page,
+      attempt: fb.correction?.attempt,
+      finished: fb.finished,
     });
   } catch (e) {
     toast(e instanceof Error ? e.message : '智能体回复失败', { pending: true });
@@ -165,6 +170,9 @@ function feedbackCard(): string {
       <p class="mt-2 text-sm font-semibold text-ink/80">${fb.correction.issue}</p>
       ${fb.correction.attempt >= 2 ? `<p class="mt-1 text-sm font-extrabold text-grass-dark">跟读示范：${fb.correction.modelAnswer}</p>` : ''}`
     : '';
+  const asrBlock = fb.asrNote
+    ? `<p class="mt-2 rounded-xl bg-wood/60 px-3 py-2 text-sm font-bold text-ink/80">🎙️ ${fb.asrNote}</p>`
+    : '';
   const sourceLabel = fb.sourceKind === 'textbook' ? '教材原句' : '教材句型表达';
   return `
   <div class="mt-3 rounded-2xl bg-white/90 px-4 py-3 shadow-sm ring-1 ring-black/5">
@@ -177,6 +185,7 @@ function feedbackCard(): string {
     </div>
     ${fb.replyZh ? `<p class="mt-2 text-sm font-semibold text-ink/75">${fb.replyZh}</p>` : ''}
     ${correctionBlock}
+    ${asrBlock}
   </div>`;
 }
 
@@ -502,6 +511,7 @@ export function bindTalk(root: HTMLElement): void {
           const scene = SCENES[state.scene].key;
           const { text } = await recognizeSpeech({ base64 });
           if (!text || !text.trim()) {
+            // ASR 空结果：不把空串当用户作答，直接提示并保持原题（服务端返回 asr_empty 不计分）
             toast('没有听清，再说一次好吗？', { pending: true });
             return;
           }

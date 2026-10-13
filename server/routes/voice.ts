@@ -135,12 +135,17 @@ router.post('/api/chat', async (req, res) => {
  */
 router.post('/api/talk/record', async (req, res) => {
   try {
-    const { scene, role, text, expected, correction } = req.body as {
+    const { scene, role, text, expected, correction, errorType, round, page, attempt, finished } = req.body as {
       scene?: string;
       role?: 'user' | 'assistant' | 'system';
       text?: string;
       expected?: string;
       correction?: string;
+      errorType?: string;
+      round?: number;
+      page?: number;
+      attempt?: number;
+      finished?: boolean;
     };
     if (!text || !role) {
       return res.status(400).json({ error: 'missing text or role' });
@@ -154,6 +159,11 @@ router.post('/api/talk/record', async (req, res) => {
       text,
       expected: expected ?? null,
       correction: correction ?? null,
+      errorType: errorType ?? null,
+      round: round ?? null,
+      page: page ?? null,
+      attempt: attempt ?? null,
+      finished: finished ?? null,
     };
     const storage = new S3Storage({});
     const storedKey = await storage.uploadFile({

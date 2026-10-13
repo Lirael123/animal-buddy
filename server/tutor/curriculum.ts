@@ -144,10 +144,117 @@ P29 动作表达：
 - 不要出现 fox、red panda、giraffe 等其它单元/野生动物词作为本场景宠物。`,
 };
 
+/* =========================================================================
+ * 第二阶段 2B：At the Zoo 场景（Part B：P31 P32 P33）
+ *
+ * 教材范围（严格受教材约束，绝不混入旧版 Amazing animals）：
+ * - P32 Part B Let's learn 五个核心野生动物词（已核对原图，可作评分依据）：
+ *     panda / monkey / tiger / elephant / lion
+ * - P33 Part B Start to read 特征词（已核对原图，可作评分依据）：big / small / tall / fast
+ * - P31 Part B Let's talk 为野生动物对话情境（fox / red panda 出现），
+ *   但该页【对话原句暂未逐字核验】→ 引导句型一律标 adapted，不作评分原句；
+ *   只把 P32/P33 已核验词汇作为确定性评分依据。
+ * - P34 Part C Project（动物图画书）不作为本场景对话内容。
+ * ========================================================================= */
+
+/** P32 五个核心野生动物词（已核验，可评分） */
+export const ZOO_WORDS: CurriculumItem[] = [
+  { pattern: 'panda', en: 'panda', zh: '熊猫', page: 32, part: 'B', kind: 'textbook' },
+  { pattern: 'monkey', en: 'monkey', zh: '猴子', page: 32, part: 'B', kind: 'textbook' },
+  { pattern: 'tiger', en: 'tiger', zh: '老虎', page: 32, part: 'B', kind: 'textbook' },
+  { pattern: 'elephant', en: 'elephant', zh: '大象', page: 32, part: 'B', kind: 'textbook' },
+  { pattern: 'lion', en: 'lion', zh: '狮子', page: 32, part: 'B', kind: 'textbook' },
+];
+
+/** P33 特征词（已核验，可作评分依据） */
+export const ZOO_ATTRIBUTES: CurriculumItem[] = [
+  { pattern: 'big', en: 'big', zh: '大的', page: 33, part: 'B', kind: 'textbook' },
+  { pattern: 'small', en: 'small', zh: '小的', page: 33, part: 'B', kind: 'textbook' },
+  { pattern: 'tall', en: 'tall', zh: '高的', page: 33, part: 'B', kind: 'textbook' },
+  { pattern: 'fast', en: 'fast', zh: '快的', page: 33, part: 'B', kind: 'textbook' },
+];
+
+/**
+ * At the Zoo 对话脚本（3–5 轮；引导句型多为教学改编 adapted，
+ * 只有明确的核心词评分依据落在 P32/P33 已核验词汇上）。
+ */
+export const ZOO_DIALOGUE: DialogueTurn[] = [
+  {
+    round: 1,
+    ask: 'Hello! We are at the zoo today. What animals do you see?',
+    askZh: '你好！今天我们来到动物园。你看到了哪些动物呀？',
+    // 情境导入 + 动物识别：说出任意一个 P32 核心动物就算答对
+    expectedPatterns: ['i see a panda', 'i see a monkey', 'i see a tiger', 'i see an elephant', 'i see a lion'],
+    acceptablePatterns: ['panda', 'monkey', 'tiger', 'elephant', 'lion', 'a panda', 'a monkey', 'a tiger', 'an elephant', 'a lion', 'i see pandas', 'i see monkeys'],
+    page: 32,
+    modelAnswer: 'I see a panda.',
+    focus: '用 I see a + 动物词 说出在动物园看到的动物（用 P32 词汇：panda/monkey/tiger/elephant/lion）',
+  },
+  {
+    round: 2,
+    ask: 'Good! What animal is it?',
+    askZh: '很好！这是什么动物呀？',
+    expectedPatterns: ["it's a panda", "it's a monkey", "it's a tiger", "it's an elephant", "it's a lion"],
+    acceptablePatterns: ['panda', 'monkey', 'tiger', 'elephant', 'lion', 'a panda', 'a monkey', 'a tiger', 'an elephant', 'a lion', "it's panda", "it's monkey"],
+    page: 32,
+    modelAnswer: "It's a monkey.",
+    focus: '用 It’s a + 动物词 回答这是什么动物（元音音素前用 an，如 an elephant）',
+  },
+  {
+    round: 3,
+    ask: 'Nice! What does the elephant look like?',
+    askZh: '真棒！这头大象看起来怎么样？',
+    expectedPatterns: ['it is big', "it's big", 'it is small', "it's small", 'it is tall', "it's tall", 'it is fast', "it's fast"],
+    acceptablePatterns: ['big', 'small', 'tall', 'fast', 'it is very big', "it's very big", 'very big', 'very small'],
+    page: 33,
+    modelAnswer: "It's big.",
+    focus: "用 It's + 特征词（big / small / tall / fast）描述动物特征（P33）",
+  },
+  {
+    round: 4,
+    ask: 'What animal do you like?',
+    askZh: '你喜欢什么动物呀？',
+    expectedPatterns: ['i like the panda', 'i like the monkey', 'i like the tiger', 'i like the elephant', 'i like the lion'],
+    acceptablePatterns: ['panda', 'monkey', 'tiger', 'elephant', 'lion', 'the panda', 'the monkey', 'i like pandas', 'i like monkeys', 'i like elephants'],
+    page: 32,
+    modelAnswer: 'I like the panda.',
+    focus: '用 I like the + 动物词 说出你喜欢的动物（综合运用）',
+  },
+];
+
+/** At the Zoo 场景（Part B） */
+export const AT_THE_ZOO_SCENE: SceneScript = {
+  key: 'at-the-zoo',
+  title: 'At the Zoo',
+  turns: ZOO_DIALOGUE,
+  pages: [31, 32, 33],
+  knowledgeBlock: `【人教版（PEP）三年级上册 Unit 3 Our animal friends — Part B，仅可使用以下教材内容】
+
+P32 Part B Let's learn 核心野生动物词（只能从这 5 个里选，可评分）：
+- panda（熊猫）、monkey（猴子）、tiger（老虎）、elephant（大象）、lion（狮子）
+- 注意：elephant 以元音音素开头，要说 an elephant。
+
+P33 Part B Start to read 特征词（可评分）：
+- big（大的）、small（小的）、tall（高的）、fast（快的）
+- 描述动物特征用："It's big." / "It's small."
+
+P31 Part B Let's talk 情境（狐狸 fox 与小熊猫 red panda 出现）：
+- 该页对话原句【尚未逐字核验】，不作为评分依据；只作情境引导。
+
+语法边界（三年级，不要超纲）：
+- 一般疑问句 What animal is it? 用 "It's a + 动物词" 回答。
+- 描述特征用 "It's + 特征词"。
+- 表达喜欢用 "I like the + 动物词"。
+- 不要在动物园场景混入宠物词 dog/cat/fish/bird/rabbit 作为场景主角，也不要混入其它单元野生动物的过期教材内容。`,
+};
+
 export const SCENES: Record<string, SceneScript> = {
   'my-pet': MY_PET_SCENE,
   // 前端场景 key 'pet' 与历史数据兼容
   pet: MY_PET_SCENE,
+  // 第二阶段 2B：At the Zoo（key 兼容前端 'zoo'）
+  'at-the-zoo': AT_THE_ZOO_SCENE,
+  zoo: AT_THE_ZOO_SCENE,
 };
 
 /* =========================================================================
@@ -271,7 +378,9 @@ export const MISUSE_RULES: MisuseRule[] = [
 export const SCENE_AUDIO_IDS: Record<string, string[]> = {
   'my-pet': ['U03_01', 'U03_02', 'U03_03'],
   pet: ['U03_01', 'U03_02', 'U03_03'],
-  // At the Zoo 场景第二阶段实现时启用：['U03_07','U03_08','U03_09']
+  // 第二阶段 2B：启用 Part B 教材原声（P31 Let's talk / P32 chant / P33 read）
+  'at-the-zoo': ['U03_07', 'U03_08', 'U03_09'],
+  zoo: ['U03_07', 'U03_08', 'U03_09'],
 };
 
 /* =========================================================================

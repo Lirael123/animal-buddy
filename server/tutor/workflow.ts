@@ -20,6 +20,16 @@ import { buildSystemPrompt } from './prompt';
 export type Verdict = 'correct' | 'incomplete' | 'incorrect';
 export type SourceKind = 'textbook' | 'adapted';
 
+/** 结构化错误分类（用于精准反馈与学习记录） */
+export type ErrorType =
+  | 'grammar' // 语法错误（如 I has）
+  | 'word' // 词汇不在教材集合内 / 用词不当
+  | 'mismatch' // 内容与当前问题不匹配（答非所问）
+  | 'incomplete' // 说得不完整，能理解但需补全
+  | 'asr_empty' // ASR 空结果 / 未识别到有效语音（不算知识错误）
+  | 'asr_low_conf' // ASR 低置信度结果（不算知识错误，需复核）
+  | 'none';
+
 export interface TutorFeedback {
   /** 给孩子听/看的一句英文回复（由模型基于教学意图生成） */
   reply: string;
@@ -50,6 +60,10 @@ export interface TutorFeedback {
   finished: boolean;
   /** 下一步教学动作（工作流内部意图，便于前端/记录使用） */
   action: 'advance' | 'retry_hint' | 'retry_model' | 'finish';
+  /** 结构化错误分类（用于学习记录/反馈；correct 时为 'none'） */
+  errorType: ErrorType;
+  /** ASR 置信度提示（低置信度/空结果时非空，说明不算知识错误） */
+  asrNote?: string;
   engine: 'builtin-doubao-workflow';
 }
 
@@ -94,41 +108,57 @@ function matches(normalized: string, patterns: string[]): string | undefined {
   return undefined;
 }
 
-function evaluateAnswer(
-  raw: string,
-  turn: DialogueTurn,
-): { verdict: Verdict; matched?: string; sourceKind: SourceKind; issue?: string } {
-  const n = normalize(raw);
-  if (!n) return { verdict: 'incomplete', sourceKind: 'adapted' };
+interface Evaluation {
+  verdict: Verdict;
+  matched?: string;
+  sourceKind: SourceKind;
+  issue?: string;
+  errorType: ErrorType;
+}
 
-  // 优先级最高：硬性语法错误（如 I has ...），即使句子里含正确宠物词也必须先拦下纠错。
-  // 不能让 "I has a dog." 因命中可接受简化答法 "a dog" 而被误判为正确。
+function evaluateAnswer(raw: string, turn: DialogueTurn): Evaluation {
+  const n = normalize(raw);
+  if (!n) return { verdict: 'incomplete', sourceKind: 'adapted', errorType: 'asr_empty' };
+
+  // 优先级最高：硬性语法错误（如 I has ...），即使句子里含正确词汇也必须先拦下纠错。
   const hardIssue = detectHardGrammarError(n);
   if (hardIssue) {
-    return { verdict: 'incorrect', sourceKind: 'adapted', issue: hardIssue };
+    return { verdict: 'incorrect', sourceKind: 'adapted', issue: hardIssue, errorType: 'grammar' };
   }
 
   const textbookHit = matches(n, turn.expectedPatterns);
   if (textbookHit) {
-    return { verdict: 'correct', matched: textbookHit, sourceKind: 'textbook' };
-  }
-
-  // 第二轮：只说宠物名等不完整表达（不是 I has 硬错）→ 提示说完整句，属于 incomplete
-  const softIssue = detectSoftIncompleteness(n, turn);
-  if (softIssue) {
-    return { verdict: 'incomplete', sourceKind: 'adapted', issue: softIssue };
+    return { verdict: 'correct', matched: textbookHit, sourceKind: 'textbook', errorType: 'none' };
   }
 
   const acceptHit = matches(n, turn.acceptablePatterns);
   if (acceptHit) {
-    // 可接受的简化/同义答法算正确，但标记为教学改编，不是教材完整原句
-    return { verdict: 'correct', matched: acceptHit, sourceKind: 'adapted' };
+    return { verdict: 'correct', matched: acceptHit, sourceKind: 'adapted', errorType: 'none' };
+  }
+
+  // 词汇错误：含教材外的词（其它动物/宠物等），但与本题无关 → 引导回到教材词汇
+  const wordIssue = detectForeignWord(n, turn);
+  if (wordIssue) {
+    return { verdict: 'incomplete', sourceKind: 'adapted', issue: wordIssue, errorType: 'word' };
+  }
+
+  // 内容不匹配：学生答了另一个问题（答非所问），但说的本身是英文
+  const mismatch = detectMismatch(n, turn);
+  if (mismatch) {
+    return { verdict: 'incomplete', sourceKind: 'adapted', issue: mismatch, errorType: 'mismatch' };
+  }
+
+  // 软性不完整：答案能理解但没说完整句
+  const softIssue = detectSoftIncompleteness(n, turn);
+  if (softIssue) {
+    return { verdict: 'incomplete', sourceKind: 'adapted', issue: softIssue, errorType: 'incomplete' };
   }
 
   return {
     verdict: 'incomplete',
     sourceKind: 'adapted',
     issue: `这一轮我们练：${turn.focus}。`,
+    errorType: 'incomplete',
   };
 }
 
@@ -140,12 +170,56 @@ function detectHardGrammarError(normalized: string): string | null {
   return null;
 }
 
-/** 软性不完整：答案能理解但没说完整句（如第二轮只报宠物名） */
+/** 词汇错误：出现了教材范围外的动物/宠物词，与本题无关 → 属于词汇用错 */
+const ZOO_ANIMAL_VOCAB = new Set(['panda', 'monkey', 'tiger', 'elephant', 'lion', 'pandas', 'monkeys', 'tigers', 'elephants', 'lions']);
+const PET_VOCAB = new Set(['dog', 'cat', 'fish', 'bird', 'rabbit', 'dogs', 'cats', 'fish', 'birds', 'rabbits']);
+
+function detectForeignWord(normalized: string, turn: DialogueTurn): string | null {
+  // 仅当学生回答中主要词是另一场景的核心动物/宠物，且不在本题目标范围时提示
+  const tokens = normalized.split(/\s+/);
+  if (turn.page === 32 || turn.page === 33) {
+    // Zoo 场景：出现宠物词（dog/cat 等）而非野生动物 → 词汇使用不当
+    const petHit = tokens.find(t => PET_VOCAB.has(t));
+    if (petHit && !ZOO_ANIMAL_VOCAB.has(tokens.find(t => ZOO_ANIMAL_VOCAB.has(t)) ?? '')) {
+      return `这一轮我们在动物园，可以用野生动物词，比如 panda、monkey、tiger，而不是 ${petHit}。`;
+    }
+    if (turn.round === 1 || turn.round === 2 || turn.round === 4) {
+      // 动物识别轮：出现不认识的其它动物词
+      const wild = tokens.find(t => /^(fox|red panda|giraffe|bear|zebra|lion tiger)$/.test(t));
+      if (wild && !tokens.find(t => ZOO_ANIMAL_VOCAB.has(t))) {
+        return `动物园里有这几种动物：panda、monkey、tiger、elephant、lion。可以试一个。`;
+      }
+    }
+  } else if (turn.page === 28 || turn.page === 29) {
+    // My Pet 场景：出现野生动物词而非宠物 → 词汇使用不当
+    const wild = tokens.find(t => ZOO_ANIMAL_VOCAB.has(t));
+    if (wild) {
+      return `我们聊的是宠物，可以说 dog、cat、fish、bird、rabbit，而不是 ${wild}。`;
+    }
+  }
+  return null;
+}
+
+/** 内容不匹配：答非所问（回答明显属于另一个问题，但本身是英文） */
+function detectMismatch(normalized: string, turn: DialogueTurn): string | null {
+  if ((turn.round === 1 || turn.round === 2 || turn.round === 4) && /^(i (have|like|am|love|want) |my name|i am \d|how are you)/i.test(normalized)) {
+    return '我们问的是动物园里的动物，试着用这句话里的动物词回答，好吗？';
+  }
+  return null;
+}
+
+/** 软性不完整：答案能理解但没说完整句 */
 function detectSoftIncompleteness(normalized: string, turn: DialogueTurn): string | null {
-  if (turn.round === 2) {
-    const onlyWord = matches(normalized, ['a dog', 'a cat', 'a fish', 'a bird', 'a rabbit', 'dog', 'cat', 'fish', 'bird', 'rabbit']);
+  if (turn.round === 1) {
+    const onlyWord = matches(normalized, ZOO_ANIMAL_VOCAB instanceof Set ? ['panda', 'monkey', 'tiger', 'elephant', 'lion'] : []);
     if (onlyWord) {
-      return '能把单词升级成完整句子吗？试试用 “I have a …” 来说。';
+      return '能把单词连成句子吗？试试用 “I see a …” 开头来说。';
+    }
+  }
+  if (turn.round === 2) {
+    const onlyWord = matches(normalized, ['panda', 'monkey', 'tiger', 'elephant', 'lion', 'dog', 'cat', 'fish', 'bird', 'rabbit']);
+    if (onlyWord) {
+      return '试试用 “It’s a …” 把答案说完整，好吗？';
     }
   }
   return null;
@@ -242,7 +316,23 @@ export async function runTutorTurn(req: Request, input: RunInput): Promise<Tutor
   let correction: TutorFeedback['correction'] | undefined;
   let finished = false;
 
-  if (evaluation.verdict === 'correct') {
+  // ASR 空结果 / 低置信度：绝不当作知识错误，不扣分、不推进，只温和请其重说一遍
+  let asrNote: string | undefined;
+  if (evaluation.errorType === 'asr_empty' || asrLowConfidence(input.text)) {
+    asrNote = '未识别到清晰的有效语音，本次不计入正确或错误。';
+    state.updatedAt = Date.now();
+    action = 'retry_hint';
+    correction = {
+      issue: '抱歉，老师没有听清你说的话，请再大声/清楚地说一遍，好吗？',
+      modelAnswer: turn.modelAnswer,
+      attempt: state.missStreak + 1,
+    };
+    instruction =
+      `孩子这次（可能是语音识别）没有清晰说出答案，疑似没听清/没识别到。` +
+      `请用一句非常简短、温和、鼓励的英语让孩子再试一次，` +
+      `可以说 "Sorry, I did not hear you. Please say it again." 之类，不要给答案、不要评判、不要追问新内容。`;
+    replyZh = '抱歉，我没听清，请再说一遍好吗？（本次不计分）';
+  } else if (evaluation.verdict === 'correct') {
     state.missStreak = 0;
     state.answered += 1;
     state.roundIndex += 1;
@@ -253,7 +343,7 @@ export async function runTutorTurn(req: Request, input: RunInput): Promise<Tutor
       action = 'advance';
       instruction =
         `孩子这一轮答对了，他的原话是："${input.text}"。` +
-        `请先用一句非常简短、贴合他回答的英语鼓励（例如针对他说了的宠物/动作稍作回应，如 Great!/Well done!/So cute!），` +
+        `请先用一句非常简短、贴合他回答的英语鼓励（例如针对他说了的词汇/表达稍作回应，如 Great!/Well done!/So cute!/Nice!），` +
         `然后自然地问出下面这【唯一一个】问题：\n` +
         `"${nextTurn.ask}"\n` +
         `只输出这一轮该说的那一句英文，不要追加其它问题。`;
@@ -263,8 +353,8 @@ export async function runTutorTurn(req: Request, input: RunInput): Promise<Tutor
       action = 'finish';
       finished = true;
       instruction =
-        '孩子已经完成 My Pet 宠物对话的全部练习，都说得很好。请用一句简短、温暖的英语表扬并收尾' +
-        '（可提到他提到的宠物/表达，例如 “Great talking with you! See you next time!”），不要再提出新问题。';
+        `孩子已经完成「${scene.title}」${scene.turns.length} 轮对话练习，都说得很好。` +
+        '请用一句简短、温暖的英语表扬并收尾（可提到他提到的词汇/表达，例如 “Great talking with you! See you next time!”），不要再提出新问题。';
     }
   } else {
     // incorrect / incomplete：同一题累计，不推进
@@ -294,7 +384,7 @@ export async function runTutorTurn(req: Request, input: RunInput): Promise<Tutor
       };
       instruction =
         `孩子这一轮没有说对（第一次，不要直接给答案），他的原话是："${input.text}"，` +
-        `中文提示为：${evaluation.issue ?? turn.focus}。` +
+        `问题类型为：${errorTypeLabel(evaluation.errorType)}，中文提示为：${evaluation.issue ?? turn.focus}。` +
         `请针对他这句话里的那个小问题，用一句非常简短、温和的英文引导他再试一次` +
         `（围绕问题 "${turn.ask}"，可顺着他已说对的词靠近，但不要把答案整句说出来），` +
         `不要重复一长串、不要提出新问题。可以说 "Try again, please." 之类。`;
@@ -324,8 +414,36 @@ export async function runTutorTurn(req: Request, input: RunInput): Promise<Tutor
     correction,
     finished,
     action,
+    errorType: asrNote ? (evaluation.errorType === 'asr_empty' ? 'asr_empty' : 'asr_low_conf') : evaluation.errorType,
+    asrNote,
     engine: 'builtin-doubao-workflow',
   };
+}
+
+/** 第二/三层：辅助函数 */
+
+function errorTypeLabel(t: ErrorType): string {
+  switch (t) {
+    case 'grammar': return '语法错误';
+    case 'word': return '词汇使用不当';
+    case 'mismatch': return '与当前问题不匹配';
+    case 'incomplete': return '表达不够完整';
+    case 'asr_empty': return '未识别到语音';
+    case 'asr_low_conf': return '识别置信度过低';
+    default: return '需补全';
+  }
+}
+
+/** ASR 低置信度 / 空结果的粗略判定（文本过短或明显像未识别 segments） */
+function asrLowConfidence(text: string): boolean {
+  const t = text.trim();
+  if (!t) return true;
+  // 识别结果常见占位（如 "。"、单字、或纯标点）
+  if (/^[。，.!?、\s]+$/.test(t)) return true;
+  if (t.length <= 1) return true;
+  // 仅由无意义单字母音节组成（ASR 常见噪音）
+  if (/^([ywuhn] ?){1,4}$/i.test(t)) return true;
+  return false;
 }
 
 /** 开始/获取一个场景的开场问题（不依赖学生先发话），并初始化会话 */

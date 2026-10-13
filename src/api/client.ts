@@ -52,6 +52,8 @@ export interface ChatResult {
   correction?: TutorCorrection;
   finished: boolean;
   action: 'advance' | 'retry_hint' | 'retry_model' | 'finish';
+  errorType?: 'grammar' | 'word' | 'mismatch' | 'incomplete' | 'asr_empty' | 'asr_low_conf' | 'none';
+  asrNote?: string;
   engine: 'builtin-doubao-workflow';
 }
 
@@ -114,13 +116,25 @@ export async function askAgent(
 }
 
 /** 记录对话/纠错过程 —— 真实后端（对象存储持久化） */
-export async function recordTalk(entry: {
+export interface TalkRecordEntry {
   scene: string;
   role: 'user' | 'assistant' | 'system';
   text: string;
   expected?: string;
   correction?: string;
-}): Promise<void> {
+  /** 结构化错误类型（学习记录用） */
+  errorType?: string;
+  /** 当前轮（1 起） */
+  round?: number;
+  /** 引用教材页码 */
+  page?: number;
+  /** 本题累计提示次数（attempt） */
+  attempt?: number;
+  /** 本轮是否完成（finish） */
+  finished?: boolean;
+}
+
+export async function recordTalk(entry: TalkRecordEntry): Promise<void> {
   await post<{ ok: boolean }>('/api/talk/record', { uid: 'animal-buddy-user', ...entry });
 }
 

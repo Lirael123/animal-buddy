@@ -1,12 +1,14 @@
 // ABOUTME: Express server with Vite integration
 // ABOUTME: Handles API routes and serves frontend in dev/prod modes
 
+import { isProduction } from './environment';
 import { createServer, type Server } from 'http';
 import express from 'express';
 import router from './routes/index';
 import { setupVite } from './vite';
+import { studentIdentity } from './identity';
 
-const isDev = process.env.COZE_PROJECT_ENV !== 'PROD';
+const isDev = !isProduction;
 const port = parseInt(process.env.PORT || '5000', 10);
 const hostname = process.env.HOSTNAME || 'localhost';
 const app = express();
@@ -27,21 +29,23 @@ async function startServer(): Promise<Server> {
   }
 
   // 添加请求体解析
-  app.use(express.json());
+  app.use(express.json({ limit: '8mb' }));
   app.use(express.urlencoded({ extended: true }));
 
   // 注册 API 路由
+  app.use('/api', studentIdentity);
   app.use(router);
 
   // 集成 Vite（开发模式）或静态文件服务（生产模式）
   await setupVite(app);
 
   // 全局错误处理
-  app.use((err: Error, req: express.Request, res: express.Response) => {
+  app.use((err: Error, _req: express.Request, res: express.Response, _next: express.NextFunction) => {
+    void _next; // Express identifies error middleware by its four-argument arity.
     console.error('Server error:', err);
     const status = 'status' in err ? (err as { status?: number }).status ?? 500 : 500;
     res.status(status).json({
-      error: err.message || 'Internal server error',
+      error: status === 413 ? '录音过长，请缩短到 30 秒以内再试' : err.message || 'Internal server error',
     });
   });
 

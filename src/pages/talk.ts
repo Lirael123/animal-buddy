@@ -1,5 +1,5 @@
 import { ASSETS } from '../assets';
-import { toast, pendingBadge, playAudio } from '../components/ui';
+import { toast, pendingBadge, playAudio, stopAudio, escapeHtml } from '../components/ui';
 import { topBar, sideMenu, bindShell, type SideItem } from '../components/shell';
 import {
   recognizeSpeech,
@@ -7,7 +7,8 @@ import {
   askAgent,
   startTalkScene,
   recordTalk,
-  fetchUnitAudioList,
+  fetchUnitAudio,
+  fetchServiceStatus,
   type ChatResult,
   type TutorVerdict,
 } from '../api/client';
@@ -17,6 +18,7 @@ interface Line {
   en: string;
   zh?: string;
   isUser?: boolean;
+  audio?: string;
   /** Rex 行携带的结构化教学反馈（来自内置工作流） */
   verdict?: TutorVerdict;
   page?: number;
@@ -70,7 +72,10 @@ const state = {
   recording: false,
   showKeyboard: false,
   busy: false, // 智能体回复中
-  starting: false, // 正在向服务端取开场问题
+  starting: false,
+  micPending: false,
+  processing: false,
+  serviceLabel: '正在检查服务…', // 正在向服务端取开场问题
   assistantAudio: '', // 最近一次智能体回复的 TTS 音频 URL（用于重听）
 };
 
@@ -82,6 +87,10 @@ let lastFeedback: ChatResult | null = null;
 const initialized = new Set<string>();
 /** 正在拉取开场的场景（重入保护，防止 rerender→bindTalk→initScene 同步递归） */
 const initializing = new Set<string>();
+let revision = 0;
+let active = false;
+let serviceChecked = false;
+function current(value: number): boolean { return active && value === revision; }
 
 function insertUserLine(text: string): void {
   live.push({ speaker: 'me', en: text, isUser: true });
@@ -99,60 +108,69 @@ function insertAgentLine(reply: string, zh: string, fb?: ChatResult): void {
 
 /** 进入/重置场景：向服务端教学工作流取教材脚本的开场问题 */
 async function initScene(root: HTMLElement, sceneKey: string): Promise<void> {
-  // 重入保护：已完成或正在初始化的场景直接返回。
-  // 关键在于必须在首次 rerender() 之前同步置位——否则 rerender→bindTalk
-  // 会再次进入本函数，而 initialized 要等 await 返回才写入，导致同步无限递归爆栈卡死页面。
   if (initialized.has(sceneKey) || initializing.has(sceneKey)) return;
+  const version = revision;
   initializing.add(sceneKey);
   state.starting = true;
   rerender(root);
   try {
     const opened = await startTalkScene(sceneKey, true);
+    if (!current(version)) return;
     live = [{ speaker: 'rex', en: opened.opening, zh: opened.openingZh, page: opened.page }];
     initialized.add(sceneKey);
   } catch (e) {
-    // 取不到开场时退回脚本内置第一问，保证页面可练；错误如实提示
+    if (!current(version)) return;
     const fallback = SCENES.find(s => s.key === sceneKey)?.openingFallback ?? 'Do you have a pet?';
-    live = [{ speaker: 'rex', en: fallback, page: 28 }];
+    live = [{ speaker: 'rex', en: fallback, page: sceneKey === 'zoo' ? 31 : 28 }];
     initialized.add(sceneKey);
     toast(e instanceof Error ? `开场获取失败：${e.message}` : '开场获取失败', { pending: true });
   } finally {
-    initializing.delete(sceneKey);
-    state.starting = false;
-    rerender(root);
+    if (current(version)) {
+      initializing.delete(sceneKey);
+      state.starting = false;
+      rerender(root);
+    }
   }
 }
 
-/** 把语音 / 文本送去内置教学智能体，得到判定 + 英语反馈并转语音 */
-async function runAgent(text: string, scene: string): Promise<void> {
-  if (state.busy) return;
+/** Display feedback before waiting on TTS; persistence never blocks the lesson. */
+async function runAgent(root: HTMLElement, text: string, scene: string): Promise<void> {
+  if (state.busy || state.starting || lastFeedback?.finished) return;
+  const version = revision;
   state.busy = true;
-  const history: { role: 'user' | 'assistant'; content: string }[] = live
-    .filter(l => l.en)
-    .map(l => ({ role: l.speaker === 'rex' ? 'assistant' : 'user', content: l.en }));
+  state.assistantAudio = '';
+  insertUserLine(text);
+  const history = live.filter(l => l.en).slice(-6)
+    .map(l => ({ role: l.speaker === 'rex' ? 'assistant' as const : 'user' as const, content: l.en }));
+  rerender(root);
+  void recordTalk({ scene, role: 'user', text }).catch(() => {
+    if (current(version)) toast('学习记录暂未保存，仍可继续练习');
+  });
   try {
-    toast('Rex 正在听你的回答…');
     const fb = await askAgent(text, scene, history);
+    if (!current(version)) return;
     lastFeedback = fb;
+    state.serviceLabel = fb.replySource === 'script' ? '教材工作流可用 · 模型暂不可用' : '教学工作流与模型已响应';
     insertAgentLine(fb.reply, fb.replyZh, fb);
-    const audio = await synthesizeSpeech(fb.reply);
-    state.assistantAudio = audio.audioUri;
-    await recordTalk({
-      scene,
-      role: 'assistant',
-      text: fb.reply,
-      expected: fb.matchedPattern || fb.question,
-      correction: fb.correction ? `${fb.correction.issue}｜示范：${fb.correction.modelAnswer}` : undefined,
-      errorType: fb.errorType,
-      round: fb.round,
-      page: fb.page,
-      attempt: fb.correction?.attempt,
-      finished: fb.finished,
-    });
-  } catch (e) {
-    toast(e instanceof Error ? e.message : '智能体回复失败', { pending: true });
-  } finally {
+    const line = live[live.length - 1];
     state.busy = false;
+    rerender(root);
+    void recordTalk({ scene, role: 'assistant', text: fb.reply,
+      expected: fb.matchedPattern || fb.question,
+      correction: fb.correction ? `${escapeHtml(fb.correction.issue)}｜示范：${escapeHtml(fb.correction.modelAnswer)}` : undefined,
+      errorType: fb.errorType, round: fb.round, page: fb.page,
+      attempt: fb.correction?.attempt, finished: fb.finished,
+    }).catch(() => { if (current(version)) toast('学习记录暂未保存，仍可继续练习'); });
+    void synthesizeSpeech(fb.reply).then(audio => {
+      if (!current(version) || live[live.length - 1] !== line) return;
+      line.audio = audio.audioUri;
+      state.assistantAudio = audio.audioUri;
+      void playAudio(audio.audioUri);
+    }).catch(() => { if (current(version)) toast('云端语音暂不可用，可阅读回复或稍后点击喇叭重试'); });
+  } catch (e) {
+    if (current(version)) toast(e instanceof Error ? e.message : '智能体回复失败', { pending: true });
+  } finally {
+    if (current(version)) { state.busy = false; rerender(root); }
   }
 }
 
@@ -174,11 +192,11 @@ function feedbackCard(): string {
       : '<span class="rounded-full bg-wood px-3 py-1 text-sm font-extrabold text-ink">💡 补全句子</span>';
   const correctionBlock = fb.correction
     ? `
-      <p class="mt-2 text-sm font-semibold text-ink/80">${fb.correction.issue}</p>
-      ${fb.correction.attempt >= 2 ? `<p class="mt-1 text-sm font-extrabold text-grass-dark">跟读示范：${fb.correction.modelAnswer}</p>` : ''}`
+      <p class="mt-2 text-sm font-semibold text-ink/80">${escapeHtml(fb.correction.issue)}</p>
+      ${fb.correction.attempt >= 2 ? `<p class="mt-1 text-sm font-extrabold text-grass-dark">跟读示范：${escapeHtml(fb.correction.modelAnswer)}</p>` : ''}`
     : '';
   const asrBlock = fb.asrNote
-    ? `<p class="mt-2 rounded-xl bg-wood/60 px-3 py-2 text-sm font-bold text-ink/80">🎙️ ${fb.asrNote}</p>`
+    ? `<p class="mt-2 rounded-xl bg-wood/60 px-3 py-2 text-sm font-bold text-ink/80">🎙️ ${escapeHtml(fb.asrNote)}</p>`
     : '';
   const sourceLabel = fb.sourceKind === 'textbook' ? '教材原句' : '教材句型表达';
   return `
@@ -190,7 +208,7 @@ function feedbackCard(): string {
       <span class="rounded-full bg-sky-pale px-3 py-1 text-xs font-bold text-ink/70">P${fb.page} · ${sourceLabel}</span>
       ${fb.finished ? '<span class="rounded-full bg-grass px-3 py-1 text-xs font-extrabold text-white">本轮完成 🎉</span>' : ''}
     </div>
-    ${fb.replyZh ? `<p class="mt-2 text-sm font-semibold text-ink/75">${fb.replyZh}</p>` : ''}
+    ${fb.replyZh ? `<p class="mt-2 text-sm font-semibold text-ink/75">${escapeHtml(fb.replyZh)}</p>` : ''}
     ${correctionBlock}
     ${asrBlock}
   </div>`;
@@ -224,12 +242,12 @@ function bubbles(): string {
     .map((l, i) => {
       const rex = l.speaker === 'rex';
       return `
-      <div class="flex ${rex ? '' : 'flex-row-reverse'} items-start gap-2.5 animate-fade-slide-up" style="animation-delay:${i * 70}ms">
+      <div class="flex ${rex ? '' : 'flex-row-reverse'} items-start gap-2.5 animate-fade-slide-up" style="animation-delay:${Math.min(i, 4) * 30}ms">
         <img src="${rex ? ASSETS.bunnyHero : ASSETS.avatarBoy}" alt="" class="h-11 w-11 shrink-0 rounded-full object-cover ring-2 ring-white shadow-sm" loading="lazy" width="44" height="44" />
         <div class="flex ${rex ? '' : 'flex-row-reverse'} items-center gap-2">
           <div class="max-w-[78%] rounded-3xl ${rex ? 'rounded-tl-md bg-white' : 'rounded-tr-md bg-sky-pale'} px-4 py-2.5 shadow-sm">
-            <p class="text-xl font-bold leading-snug text-ink">${verdictTag(l)}${l.en}</p>
-            ${l.zh ? `<p class="mt-0.5 text-sm text-ink/55">${l.zh}</p>` : ''}
+            <p class="text-xl font-bold leading-snug text-ink">${verdictTag(l)}${escapeHtml(l.en)}</p>
+            ${l.zh ? `<p class="mt-0.5 text-sm text-ink/55">${escapeHtml(l.zh)}</p>` : ''}
             ${l.page ? `<p class="mt-1 text-xs font-semibold text-ink/35">Unit 3 · P${l.page}</p>` : ''}
           </div>
           <button data-speak="${i}" class="pressable grid h-9 w-9 shrink-0 place-items-center rounded-full bg-grass text-white shadow-sm">🔊</button>
@@ -275,9 +293,9 @@ export function renderTalk(): string {
           <p class="mb-3 flex flex-wrap items-center gap-2 text-base font-bold text-ink/55">
             ${s.page}
             ${s.tutorEnabled
-              ? '<span class="rounded-full bg-grass px-2.5 py-0.5 text-xs font-bold text-white">内置智能体已联通</span>'
+              ? `<span class="rounded-full bg-grass px-2.5 py-0.5 text-xs font-bold text-white">${escapeHtml(state.serviceLabel)}</span>`
               : '<span class="rounded-full bg-orange px-2.5 py-0.5 text-xs font-bold text-white">第二阶段开放</span>'}
-            <span class="rounded-full bg-mint-pale px-2.5 py-0.5 text-xs font-bold text-ink/60">ASR · TTS 真实语音</span>
+            <span class="rounded-full bg-mint-pale px-2.5 py-0.5 text-xs font-bold text-ink/60">语音需云端服务响应</span>
           </p>
           <div id="talk-list" class="flex flex-1 flex-col gap-4 overflow-y-auto pr-1">
             ${bubbles()}
@@ -291,7 +309,7 @@ export function renderTalk(): string {
             <div class="flex gap-2">
               <input id="key-input" type="text" placeholder="输入你想说的英语句子…"
                 class="w-full rounded-2xl border-2 border-grass-soft bg-white px-4 py-3 text-lg font-semibold text-ink outline-none focus:border-grass" />
-              <button data-send class="pressable shrink-0 rounded-2xl bg-grass px-5 text-lg font-extrabold text-white">发送</button>
+              <button data-send ${state.busy || state.starting || state.processing || state.recording || lastFeedback?.finished ? 'disabled' : ''} class="pressable shrink-0 rounded-2xl bg-grass px-5 text-lg font-extrabold text-white">发送</button>
             </div>
           </div>
         </section>
@@ -332,6 +350,7 @@ let stream: MediaStream | null = null;
 const chunks: BlobPart[] = [];
 
 function rerender(root: HTMLElement): void {
+  if (!active) return;
   root.innerHTML = renderTalk();
   bindTalk(root);
   const list = document.getElementById('talk-list');
@@ -342,6 +361,7 @@ function rerender(root: HTMLElement): void {
 async function blobToWavBase64(blob: Blob): Promise<string> {
   const arrayBuf = await blob.arrayBuffer();
   const ctx = new AudioContext();
+  try {
   const audioBuf = await ctx.decodeAudioData(arrayBuf);
   const samples = audioBuf.getChannelData(0);
   const out = new Int16Array(samples.length);
@@ -368,7 +388,6 @@ async function blobToWavBase64(blob: Blob): Promise<string> {
   writeStr(36, 'data');
   view.setUint32(40, out.length * 2, true);
   new Int16Array(buffer, 44).set(out);
-  await ctx.close();
   const bytes = new Uint8Array(buffer);
   let bin = '';
   const chunk = 0x8000;
@@ -376,183 +395,180 @@ async function blobToWavBase64(blob: Blob): Promise<string> {
     bin += String.fromCharCode(...bytes.subarray(i, i + chunk));
   }
   return btoa(bin);
+  } finally { await ctx.close(); }
 }
 
 /** 申请麦克风，带 8s 超时，避免权限请求在部分设备上既不 resolve 也不 reject 而卡死 */
 async function getMicStream(): Promise<MediaStream> {
-  if (!navigator.mediaDevices?.getUserMedia) {
-    throw new Error('当前浏览器不支持麦克风录音');
+  if (!navigator.mediaDevices?.getUserMedia || typeof MediaRecorder === 'undefined') {
+    throw new Error('当前浏览器不支持麦克风录音，请使用键盘输入');
   }
   return new Promise<MediaStream>((resolve, reject) => {
-    const timer = setTimeout(() => reject(new Error('麦克风开启超时，请检查权限设置后重试')), 8000);
-    navigator.mediaDevices
-      .getUserMedia({ audio: true })
-      .then(s => { clearTimeout(timer); resolve(s); })
-      .catch(e => { clearTimeout(timer); reject(e); });
+    let settled = false;
+    const timer = setTimeout(() => { settled = true; reject(new Error('麦克风开启超时，请检查权限后重试')); }, 8000);
+    navigator.mediaDevices.getUserMedia({ audio: true }).then(s => {
+      clearTimeout(timer);
+      if (settled) { s.getTracks().forEach(track => track.stop()); return; }
+      settled = true;
+      resolve(s);
+    }).catch(e => { clearTimeout(timer); settled = true; reject(e); });
   });
 }
 
+let recordTimer: ReturnType<typeof setTimeout> | undefined;
+export function cleanupTalk(): void {
+  active = false;
+  revision++;
+  if (recordTimer) clearTimeout(recordTimer);
+  if (recorder) {
+    recorder.onstop = null;
+    recorder.ondataavailable = null;
+    if (recorder.state !== 'inactive') recorder.stop();
+  }
+  stream?.getTracks().forEach(track => track.stop());
+  recorder = null;
+  stream = null;
+  chunks.length = 0;
+  state.recording = state.busy = state.starting = state.micPending = state.processing = false;
+  state.assistantAudio = '';
+  initialized.clear();
+  initializing.clear();
+  live = [];
+  lastFeedback = null;
+  stopAudio();
+}
+
 export function bindTalk(root: HTMLElement): void {
+  active = true;
   bindShell(root);
+  if (!serviceChecked) {
+    serviceChecked = true;
+    const version = revision;
+    void fetchServiceStatus().then(status => {
+      if (!current(version)) return;
+      state.serviceLabel = status.cloudConfigured ? '教材工作流可用 · 云端待验证' : '教材工作流可用 · 云端未配置';
+      rerender(root);
+    }).catch(() => { if (current(version)) { state.serviceLabel = '服务暂不可用，请检查网络'; rerender(root); } });
+  }
 
   root.querySelectorAll<HTMLButtonElement>('[data-side]').forEach(btn => {
     btn.addEventListener('click', () => {
       const idx = SCENES.findIndex(sc => sc.key === btn.dataset.side);
-      if (idx === state.scene) return;
+      if (idx < 0 || idx === state.scene) return;
+      cleanupTalk();
       state.scene = idx;
       state.showKeyboard = false;
-      state.assistantAudio = '';
-      lastFeedback = null;
-      live = []; // 切换场景重置对话
+      active = true;
       rerender(root);
-      const sc = SCENES[state.scene];
-      if (sc.tutorEnabled) void initScene(root, sc.key);
     });
   });
 
-  // 首次进入：拉取 My Pet 教材脚本开场问题（服务端工作流初始化会话）
-  const initialScene = SCENES[state.scene];
-  if (initialScene.tutorEnabled) void initScene(root, initialScene.key);
+  const scene = SCENES[state.scene];
+  void initScene(root, scene.key);
 
   root.querySelectorAll<HTMLButtonElement>('[data-speak]').forEach(btn => {
     btn.addEventListener('click', () => {
-      const i = Number(btn.dataset.speak);
-      const lines = displayLines();
-      const text = lines[i]?.en;
-      if (!text) return;
-      // 用户句子用后端 TTS；教材/Agent 行若已有音频则播放，否则 TTS
-      if (lines[i].isUser) {
-        void synthesizeSpeech(text).then(r => playAudio(r.audioUri)).catch(() => toast('合成失败'));
-      } else if (i === displayLines().length - 1 && state.assistantAudio) {
-        playAudio(state.assistantAudio);
-      } else {
-        void synthesizeSpeech(text).then(r => playAudio(r.audioUri)).catch(() => toast('合成失败'));
-      }
+      const line = live[Number(btn.dataset.speak)];
+      if (!line) return;
+      if (line.audio) { void playAudio(line.audio); return; }
+      const version = revision;
+      btn.disabled = true;
+      void synthesizeSpeech(line.en).then(result => {
+        if (!current(version)) return;
+        line.audio = result.audioUri;
+        void playAudio(result.audioUri);
+      }).catch(() => { if (current(version)) toast('云端语音合成失败，请稍后重试'); })
+        .finally(() => { btn.disabled = false; });
     });
   });
 
-  root.querySelector('[data-original]')?.addEventListener('click', async () => {
-    const scene = SCENES[state.scene];
-    const ids = scene.audioIds ?? [];
-    if (!ids.length) {
-      toast('本场景暂无教材原声', { pending: true });
-      return;
-    }
-    if (state.busy) return;
-    state.busy = true;
-    rerender(root);
+  root.querySelector<HTMLButtonElement>('[data-original]')?.addEventListener('click', async event => {
+    const button = event.currentTarget as HTMLButtonElement;
+    if (button.disabled) return;
+    button.disabled = true;
+    const version = revision;
     try {
-      // 真实教材原声：从对象存储动态签名，播放第一段（对应本场景主栏目原声）
-      const audios = await fetchUnitAudioList();
-      const target = ids.map(id => audios.find(a => a.id === id)).find((a): a is NonNullable<typeof a> => Boolean(a && a.url));
-      if (!target || !target.url) {
-        throw new Error('未找到可播放的教材原声片段');
-      }
-      playAudio(target.url);
-      toast(`正在播放教材原声《${target.activity}》·P${target.page}`);
+      const audio = await fetchUnitAudio(scene.audioIds[0]);
+      if (current(version) && audio.url) await playAudio(audio.url);
     } catch (e) {
-      toast(`教材原声播放失败：${e instanceof Error ? e.message : '未知错误'}`, { pending: true });
-    } finally {
-      state.busy = false;
-      rerender(root);
-    }
+      if (current(version)) toast(e instanceof Error ? e.message : '教材原声播放失败');
+    } finally { button.disabled = false; }
   });
 
   root.querySelector('[data-keyboard]')?.addEventListener('click', () => {
     state.showKeyboard = !state.showKeyboard;
     rerender(root);
-    if (state.showKeyboard) document.getElementById('key-input')?.focus();
+    if (state.showKeyboard) root.querySelector<HTMLInputElement>('#key-input')?.focus();
   });
-
-  root.querySelector('[data-send]')?.addEventListener('click', () => submitKeyboard());
-  document.getElementById('key-input')?.addEventListener('keydown', e => {
-    if (e.key === 'Enter') submitKeyboard();
-  });
-
-  async function submitKeyboard(): Promise<void> {
-    const input = document.getElementById('key-input') as HTMLInputElement | null;
-    const v = (input?.value ?? '').trim();
-    if (!v) return;
+  const submitKeyboard = (): void => {
+    if (state.busy || state.starting || state.processing || state.recording || lastFeedback?.finished) return;
+    const input = root.querySelector<HTMLInputElement>('#key-input');
+    const value = (input?.value || '').trim();
+    if (!value) return;
     if (input) input.value = '';
     state.showKeyboard = false;
-    insertUserLine(v);
-    await recordTalk({ scene: SCENES[state.scene].key, role: 'user', text: v }).catch(() => toast('记录失败'));
-    rerender(root);
-    await runAgent(v, SCENES[state.scene].key);
-    rerender(root);
-    if (state.assistantAudio) playAudio(state.assistantAudio);
-  }
-
+    void runAgent(root, value, scene.key);
+  };
+  root.querySelector('[data-send]')?.addEventListener('click', submitKeyboard);
+  root.querySelector('#key-input')?.addEventListener('keydown', event => {
+    if ((event as KeyboardEvent).key === 'Enter') submitKeyboard();
+  });
   root.querySelector('[data-replay]')?.addEventListener('click', () => {
-    if (state.assistantAudio) {
-      playAudio(state.assistantAudio);
-      toast('重听外教回复');
-    } else {
-      toast('还没有可重听的 Agent 回复，先说一句吧', { pending: true });
+    const last = [...live].reverse().find(line => line.speaker === 'rex');
+    if (last?.audio) void playAudio(last.audio);
+    else if (last) {
+      const version = revision;
+      void synthesizeSpeech(last.en).then(result => { if (current(version)) void playAudio(result.audioUri); })
+        .catch(() => { if (current(version)) toast('云端语音合成失败，请稍后重试'); });
     }
   });
-
   root.querySelector('[data-clear]')?.addEventListener('click', () => {
-    state.showKeyboard = false;
-    state.assistantAudio = '';
-    lastFeedback = null;
-    live = [];
-    const sc = SCENES[state.scene];
-    // 允许重新开始：清除初始化标记，重新向服务端取开场（服务端会重建会话状态机）
-    initialized.delete(sc.key);
-    toast('已重新开始本场景对话');
+    cleanupTalk();
+    active = true;
     rerender(root);
-    if (sc.tutorEnabled) void initScene(root, sc.key);
   });
 
-  // 麦克风：录音 → WAV → 真实 ASR → Agent → TTS → 播放 + 记录
   root.querySelector('[data-mic]')?.addEventListener('click', async () => {
-    if (state.recording && recorder && recorder.state !== 'inactive') {
-      recorder.stop();
-      return;
-    }
-    if (state.busy) {
-      toast('外教正在回复，请稍候');
-      return;
-    }
+    if (state.recording && recorder?.state !== 'inactive') { recorder?.stop(); return; }
+    if (state.busy || state.starting || state.processing || state.micPending || lastFeedback?.finished) return;
+    const version = revision;
+    state.micPending = true;
     try {
-      stream = await getMicStream();
-      const mime = MediaRecorder.isTypeSupported('audio/webm') ? 'audio/webm' : '';
-      recorder = new MediaRecorder(stream, mime ? { mimeType: mime } : undefined);
+      const microphone = await getMicStream();
+      if (!current(version)) { microphone.getTracks().forEach(track => track.stop()); return; }
+      stream = microphone;
+      const mime = ['audio/webm', 'audio/mp4'].find(type => MediaRecorder.isTypeSupported(type));
+      const recording = new MediaRecorder(microphone, mime ? { mimeType: mime } : undefined);
+      recorder = recording;
       chunks.length = 0;
-      recorder.ondataavailable = ev => chunks.push(ev.data);
-      recorder.onstop = async () => {
-        stream?.getTracks().forEach(t => t.stop());
+      recording.ondataavailable = event => chunks.push(event.data);
+      recording.onstop = async () => {
+        if (recordTimer) clearTimeout(recordTimer);
+        microphone.getTracks().forEach(track => track.stop());
+        if (!current(version)) return;
         state.recording = false;
-        const blob = new Blob(chunks, { type: mime || 'audio/webm' });
+        state.processing = true;
+        const blob = new Blob(chunks, { type: recording.mimeType });
         rerender(root);
         try {
-          toast('正在识别你的声音…');
           const base64 = await blobToWavBase64(blob);
-          const scene = SCENES[state.scene].key;
-          const { text } = await recognizeSpeech({ base64 });
-          if (!text || !text.trim()) {
-            // ASR 空结果：不把空串当用户作答，直接提示并保持原题（服务端返回 asr_empty 不计分）
-            toast('没有听清，再说一次好吗？', { pending: true });
-            return;
-          }
-          insertUserLine(text);
-          await recordTalk({ scene, role: 'user', text }).catch(() => toast('记录失败'));
-          rerender(root);
-          await runAgent(text, scene);
-          rerender(root);
-          if (state.assistantAudio) playAudio(state.assistantAudio);
+          if (!current(version)) return;
+          const result = await recognizeSpeech({ base64 });
+          if (!current(version)) return;
+          state.processing = false;
+          if (!result.text.trim()) { toast('没有听清，请再说一次'); return; }
+          await runAgent(root, result.text, scene.key);
         } catch (e) {
-          toast(e instanceof Error ? `${e.message}` : '语音识别失败', { pending: true });
-        }
+          if (current(version)) toast(e instanceof Error ? e.message : '语音识别失败');
+        } finally { if (current(version)) { state.processing = false; rerender(root); } }
       };
-      recorder.start();
+      recording.start();
       state.recording = true;
+      recordTimer = setTimeout(() => { if (recording.state !== 'inactive') recording.stop(); }, 30000);
       rerender(root);
     } catch (e) {
-      const msg = e instanceof Error ? e.message : '';
-      // NotAllowedError（拒绝/未授权）给权限引导；其它（超时/不支持）显示具体原因
-      toast(/denied|permission|allow/i.test(msg) ? '请允许使用麦克风后再练习' : msg || '麦克风开启失败，请重试', { pending: true });
-    }
+      stream?.getTracks().forEach(track => track.stop());
+      if (current(version)) toast(e instanceof Error ? e.message : '麦克风开启失败');
+    } finally { if (current(version)) state.micPending = false; }
   });
 }

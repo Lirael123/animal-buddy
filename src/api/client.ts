@@ -52,8 +52,9 @@ export interface ChatResult {
   correction?: TutorCorrection;
   finished: boolean;
   action: 'advance' | 'retry_hint' | 'retry_model' | 'finish';
-  errorType?: 'grammar' | 'word' | 'mismatch' | 'incomplete' | 'asr_empty' | 'unclear_transcript' | 'none';
+  errorType?: 'grammar' | 'missing_article' | 'word' | 'mismatch' | 'incomplete' | 'asr_empty' | 'unclear_transcript' | 'none';
   asrNote?: string;
+  replySource?: 'model' | 'script';
   engine: 'builtin-doubao-workflow';
 }
 
@@ -64,6 +65,7 @@ export interface TalkStartResult {
   openingZh: string;
   round: number;
   page: number;
+  replySource?: 'model' | 'script';
   engine: 'builtin-doubao-workflow';
 }
 
@@ -72,47 +74,64 @@ export interface HistoryItem {
   content: string;
 }
 
-/**
- * 带超时的 fetch：默认 15s 自动中止，避免后端/网络挂起时 await 永不 resolve
- * 把页面卡在 loading。AbortError 统一转成可读错误。
- */
-async function fetchWithTimeout(
-  input: string,
-  init: RequestInit = {},
-  timeoutMs = 15000,
-): Promise<Response> {
+const pending = new Set<AbortController>();
+let identityReady: Promise<unknown> | null = null;
+let requestVersion = 0;
+export function cancelApiRequests(): void {
+  requestVersion++;
+  for (const controller of pending) controller.abort();
+  pending.clear();
+}
+
+/** The deadline includes response-body reading, not only receipt of headers. */
+export async function request<T>(path: string, init: RequestInit = {}, timeoutMs = 15000): Promise<T> {
+  const version = requestVersion;
+  if (path !== '/api/session') {
+    try { await (identityReady ??= request('/api/session')); }
+    catch (error) { identityReady = null; throw error; }
+  }
+  if (version !== requestVersion) throw new DOMException('Page changed', 'AbortError');
   const controller = new AbortController();
-  const timer = setTimeout(() => controller.abort(), timeoutMs);
+  pending.add(controller);
+  let timedOut = false;
+  const timer = setTimeout(() => { timedOut = true; controller.abort(); }, timeoutMs);
   try {
-    return await fetch(input, { ...init, signal: controller.signal });
-  } catch (e) {
-    if (e instanceof DOMException && e.name === 'AbortError') {
-      throw new Error(`请求超时（${Math.round(timeoutMs / 1000)}s），请稍后重试`);
+    const res = await fetch(path, { ...init, credentials: 'same-origin', signal: controller.signal });
+    if (!res.headers.get('content-type')?.includes('application/json')) {
+      throw new Error('接口未返回 JSON，请确认同时部署了 Express 后端');
     }
-    throw e;
+    const data: unknown = await res.json();
+    const details = typeof data === 'object' && data !== null ? data as { error?: unknown; detail?: unknown } : {};
+    if (!res.ok || typeof details.error === 'string') {
+      throw new Error(typeof details.detail === 'string' ? details.detail : typeof details.error === 'string' ? details.error : `请求失败（${res.status}）`);
+    }
+    return data as T;
+  } catch (error) {
+    if (timedOut) throw new Error(`请求超时（${Math.round(timeoutMs / 1000)} 秒），请重试`);
+    throw error;
   } finally {
     clearTimeout(timer);
+    pending.delete(controller);
   }
 }
 
-/** 通用请求封装：转发给同源后端 */
-async function post<T>(path: string, body: Record<string, unknown>): Promise<T> {
-  const res = await fetchWithTimeout(path, {
-    method: 'POST',
-    headers: { 'Content-Type': 'application/json' },
-    body: JSON.stringify(body),
-  });
-  const data = (await res.json()) as T & { error?: string; detail?: string };
-  if (!res.ok || typeof (data as { error?: string }).error === 'string') {
-    const err = (data as { error?: string; detail?: string }).error ?? '请求失败';
-    throw new Error((data as { detail?: string }).detail || err);
-  }
-  return data;
+async function post<T>(path: string, body: Record<string, unknown>, timeoutMs = 15000): Promise<T> {
+  return request<T>(path, {
+    method: 'POST', headers: { 'Content-Type': 'application/json' }, body: JSON.stringify(body),
+  }, timeoutMs);
 }
+
+export interface ServiceStatus {
+  status: string;
+  tutor: 'builtin';
+  cloudConfigured: boolean;
+  checked: false;
+}
+export function fetchServiceStatus(): Promise<ServiceStatus> { return request('/api/health'); }
 
 /** 语音识别 ASR：接收音频 url 或 base64，返回识别文本 —— 真实后端 */
 export async function recognizeSpeech(audio: { url?: string; base64?: string }): Promise<ASRResult> {
-  const body: Record<string, unknown> = { uid: 'animal-buddy-user' };
+  const body: Record<string, unknown> = {};
   if (audio.url) body.url = audio.url;
   if (audio.base64) body.base64Data = audio.base64;
   return post<ASRResult>('/api/asr', body);
@@ -120,12 +139,12 @@ export async function recognizeSpeech(audio: { url?: string; base64?: string }):
 
 /** 语音合成 TTS：英文回复 → 可播放 mp3 URL —— 真实后端 */
 export async function synthesizeSpeech(text: string): Promise<TTSResult> {
-  return post<TTSResult>('/api/tts', { uid: 'animal-buddy-user', text });
+  return post<TTSResult>('/api/tts', { text });
 }
 
 /** 开启/重置某场景：拿到 Rex 的教材脚本开场问题 —— 真实后端（不调模型，即时返回） */
 export async function startTalkScene(scene: string, reset = true): Promise<TalkStartResult> {
-  return post<TalkStartResult>('/api/talk/start', { uid: 'animal-buddy-user', scene, reset });
+  return post<TalkStartResult>('/api/talk/start', { scene, reset });
 }
 
 /** 内置教学智能体：学生文本/识别文本 → 工作流判定 + 三年级英文反馈 —— 真实后端 */
@@ -135,7 +154,7 @@ export async function askAgent(
   history: HistoryItem[],
   reset = false,
 ): Promise<ChatResult> {
-  return post<ChatResult>('/api/chat', { uid: 'animal-buddy-user', text, scene, history, reset });
+  return post<ChatResult>('/api/chat', { text, scene, history, reset });
 }
 
 /** 记录对话/纠错过程 —— 真实后端（对象存储持久化） */
@@ -158,7 +177,7 @@ export interface TalkRecordEntry {
 }
 
 export async function recordTalk(entry: TalkRecordEntry): Promise<void> {
-  await post<{ ok: boolean }>('/api/talk/record', { uid: 'animal-buddy-user', ...entry });
+  await post<{ ok: boolean }>('/api/talk/record', { ...entry }, 5000);
 }
 
 export interface UnitAudioItem {
@@ -177,21 +196,15 @@ export interface UnitAudioItem {
 /** 教材原声清单（真实 MP3，对象存储 + 动态签名 URL）—— 真实后端 */
 export async function fetchUnitAudioList(page?: number): Promise<UnitAudioItem[]> {
   const qs = page ? `?page=${page}` : '';
-  const res = await fetchWithTimeout(`/api/audio${qs}`);
-  const data = (await res.json()) as { items?: UnitAudioItem[]; error?: string };
-  if (!res.ok || !Array.isArray(data.items)) {
-    throw new Error(data.error || '获取教材原声清单失败');
-  }
+  const data = await request<{ items: UnitAudioItem[] }>(`/api/audio${qs}`);
+  if (!Array.isArray(data.items)) throw new Error('教材原声清单格式错误');
   return data.items;
 }
 
 /** 单段教材原声（按 U03_xx id）—— 真实后端，返回可播放 url */
 export async function fetchUnitAudio(id: string): Promise<UnitAudioItem> {
-  const res = await fetchWithTimeout(`/api/audio/${encodeURIComponent(id)}`);
-  const data = (await res.json()) as UnitAudioItem & { error?: string };
-  if (!res.ok || typeof data.url !== 'string') {
-    throw new Error(data.error || '获取教材原声失败');
-  }
+  const data = await request<UnitAudioItem>(`/api/audio/${encodeURIComponent(id)}`);
+  if (typeof data.url !== 'string') throw new Error('教材原声暂不可用');
   return data;
 }
 
@@ -279,7 +292,7 @@ export interface ProgressSummary {
 
 /** 获取可练习听写题目（服务端题库，不含标准答案） */
 export async function fetchDictationList(type?: DictationType | ''): Promise<DictationListResult> {
-  return post<DictationListResult>('/api/dictation/list', { uid: 'animal-buddy-user', type: type || undefined });
+  return post<DictationListResult>('/api/dictation/list', { type: type || undefined });
 }
 
 /** 提交一题听写，服务端固定评分 + 幂等落库 + 返回反馈 */
@@ -289,7 +302,6 @@ export async function submitDictation(
   opts: { session: string; isAsr?: boolean; isRetry?: boolean },
 ): Promise<DictationScoreResult> {
   return post<DictationScoreResult>('/api/dictation/submit', {
-    uid: 'animal-buddy-user',
     qid,
     answer,
     session: opts.session,
@@ -300,25 +312,17 @@ export async function submitDictation(
 
 /** 获取某题的播放语音（教材原声或 TTS 合成，标注来源） */
 export async function fetchDictationAudio(qid: string): Promise<DictationAudioResult> {
-  return post<DictationAudioResult>('/api/dictation/audio', { uid: 'animal-buddy-user', qid });
+  return post<DictationAudioResult>('/api/dictation/audio', { qid });
 }
 
 /** 获取自己的错题记录（服务端按 uid 过滤） */
 export async function fetchDictationRecords(): Promise<DictationRecordItem[]> {
-  const res = await fetchWithTimeout('/api/dictation/records?uid=animal-buddy-user');
-  const data = (await res.json()) as { items?: DictationRecordItem[]; error?: string };
-  if (!res.ok || !Array.isArray(data.items)) {
-    throw new Error(data.error || '获取错题记录失败');
-  }
+  const data = await request<{ items: DictationRecordItem[] }>('/api/dictation/records');
+  if (!Array.isArray(data.items)) throw new Error('错题记录格式错误');
   return data.items;
 }
 
 /** 获取学习进度（仅本人可读，服务端校验） */
 export async function fetchProgress(): Promise<ProgressSummary> {
-  const res = await fetchWithTimeout('/api/progress?uid=animal-buddy-user');
-  const data = (await res.json()) as ProgressSummary & { error?: string };
-  if (!res.ok || data.exercised === undefined) {
-    throw new Error(data.error || '获取学习进度失败');
-  }
-  return data;
+  return request<ProgressSummary>('/api/progress');
 }

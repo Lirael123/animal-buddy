@@ -75,7 +75,17 @@ export interface SubmitResult {
 /**
  * 记录一次提交：首次建记录，重练/重复则合并更新同一条（幂等去重）。
  */
+const writes = new Map<string, Promise<unknown>>();
 export async function recordSubmission(inp: SubmitInput): Promise<SubmitResult> {
+  const key = `${inp.uid}::${inp.qid}::${inp.session}`;
+  const previous = writes.get(key) || Promise.resolve();
+  const work = previous.catch(() => undefined).then(() => saveSubmission(inp));
+  writes.set(key, work);
+  try { return await work; }
+  finally { if (writes.get(key) === work) writes.delete(key); }
+}
+async function saveSubmission(inp: SubmitInput): Promise<SubmitResult> {
+  if (inp.asrSkipped) return { attempt: null, counted: false };
   const { uid, qid, session } = inp;
   const existing = await findAttempt(uid, qid, session);
 
@@ -124,43 +134,27 @@ export async function recordSubmission(inp: SubmitInput): Promise<SubmitResult> 
     updated.mastered = inp.isCorrect;
   } else {
     updated.mastered = true;
-    updated.corrected = true;
+    updated.corrected = existing.firstCorrect === 0;
+    updated.vocabOk = existing.vocabOk;
+    updated.formOk = existing.formOk;
   }
   await persist(updated);
   return { attempt: updated, counted: false };
 }
 
 async function persist(a: DictationAttempt): Promise<void> {
-  // SDK 会对 fileName 追加随机后缀，无法按同名覆盖；
-  // 故先删除同一 uid+qid+session 的既有对象，再写入，保证"每道题一轮练习只对应一个对象"。
-  await removeStaleFor(a.uid, a.qid, a.session);
-  await storage.uploadFile({
+  // Upload first. A failed upload must never erase the previous result.
+  const old = await storage.listFiles({ prefix: `${UID_KEY(a.uid)}${a.qid}-${a.session}_`, maxKeys: 1000 });
+  const key = await storage.uploadFile({
     fileContent: Buffer.from(JSON.stringify(a)),
     fileName: `${PREFIX}${a.uid}/${a.qid}-${a.session}.json`,
     contentType: 'application/json',
   });
-}
-
-/** 删除某 uid 下与 uid+qid+session 相关的既有对象（幂等去重的核心） */
-async function removeStaleFor(owner: string, qid: string, session: string): Promise<void> {
-  let keys: string[] = [];
-  try {
-    const r = await storage.listFiles({ prefix: UID_KEY(owner), maxKeys: 1000 });
-    keys = (r.keys || []).filter((k) => new RegExp(`/${escapeReg(qid)}-${escapeReg(session)}`).test(k));
-  } catch {
-    keys = [];
-  }
-  for (const k of keys) {
-    try {
-      await storage.deleteFile({ fileKey: k });
-    } catch {
-      // 忽略删除失败（并发/不存在），下次 persist 会再次收敛
-    }
-  }
-}
-
-function escapeReg(s: string): string {
-  return s.replace(/[.*+?^${}()|[\]\\]/g, '\\$&');
+  a.key = key;
+  const exact = new RegExp(`^${UID_KEY(a.uid)}${a.qid}-${a.session}_[a-f0-9]{8}\\.json$`);
+  await Promise.all((old.keys || []).filter(fileKey => exact.test(fileKey)).map(async fileKey => {
+    try { await storage.deleteFile({ fileKey }); } catch { /* new result remains durable */ }
+  }));
 }
 
 /** 查找某 uid+qid+session 的既有记录 */
@@ -172,22 +166,21 @@ async function findAttempt(uid: string, qid: string, session: string): Promise<D
 /** 读取某学生全部听写记录（已按 uid 过滤属主） */
 export async function listAttempts(uid: string): Promise<DictationAttempt[]> {
   const prefix = UID_KEY(uid);
-  let keys: string[] = [];
-  try {
-    const r = await storage.listFiles({ prefix, maxKeys: 1000 });
-    keys = (r.keys || []).filter(Boolean);
-  } catch {
-    keys = [];
-  }
+  const listed = await storage.listFiles({ prefix, maxKeys: 1000 });
+  if (listed.isTruncated) throw new Error('学习记录超过当前读取上限，需要扩展存储分页后查看完整进度');
+  const keys = listed.keys || [];
   const out: DictationAttempt[] = [];
-  for (const k of keys) {
-    try {
+  // Small bounded batches avoid one storage round trip per record in series.
+  for (let i = 0; i < keys.length; i += 8) {
+    await Promise.all(keys.slice(i, i + 8).map(async k => {
       const buf = await storage.readFile({ fileKey: k });
-      const parsed = JSON.parse(buf.toString('utf8'));
-      if (parsed && parsed.uid === uid) out.push(parsed as DictationAttempt);
-    } catch {
-      // 跳过坏记录（如并发写入临时态）
-    }
+      try {
+        const parsed: unknown = JSON.parse(buf.toString('utf8'));
+        if (typeof parsed === 'object' && parsed !== null && 'uid' in parsed && parsed.uid === uid) {
+          out.push({ ...parsed as DictationAttempt, key: k });
+        }
+      } catch { /* skip malformed JSON only; report storage/network failures */ }
+    }));
   }
   return out.sort((x, y) => (x.createdAt < y.createdAt ? -1 : 1));
 }

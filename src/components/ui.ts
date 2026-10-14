@@ -10,6 +10,9 @@ export function pendingBadge(label = '待接入'): string {
  * 若说明功能属「待接入」，toast 会带上橙色提醒。
  */
 let toastTimer: ReturnType<typeof setTimeout> | null = null;
+export function escapeHtml(value: string): string {
+  return value.replace(/[&<>"']/g, char => ({ '&': '&amp;', '<': '&lt;', '>': '&gt;', '"': '&quot;', "'": '&#39;' }[char] || char));
+}
 export function toast(message: string, opts: { pending?: boolean } = {}): void {
   let host = document.getElementById('toast-host');
   if (!host) {
@@ -30,7 +33,7 @@ export function toast(message: string, opts: { pending?: boolean } = {}): void {
   text.className = 'text-sm font-semibold text-ink';
   text.textContent = message;
   el.appendChild(text);
-  host.appendChild(el);
+  host.replaceChildren(el);
 
   if (toastTimer) clearTimeout(toastTimer);
   toastTimer = setTimeout(() => {
@@ -39,11 +42,44 @@ export function toast(message: string, opts: { pending?: boolean } = {}): void {
 }
 
 /** 真实播放一段音频（仅当 url 存在可用时） */
-export function playAudio(url: string): void {
+let activeAudio: HTMLAudioElement | null = null;
+let audioVersion = 0;
+export function stopAudio(): void {
+  audioVersion++;
+  activeAudio?.pause();
+  if (activeAudio) {
+    activeAudio.removeAttribute('src');
+    activeAudio.load();
+  }
+  activeAudio = null;
+  document.getElementById('audio-retry')?.remove();
+}
+
+/** Handle autoplay rejection explicitly and provide a fresh user gesture. */
+export async function playAudio(url: string): Promise<boolean> {
+  stopAudio();
+  const version = audioVersion;
+  const audio = new Audio(url);
+  activeAudio = audio;
+  audio.onerror = () => {
+    if (version === audioVersion) toast('音频加载失败，请检查网络后重试');
+  };
   try {
-    const audio = new Audio(url);
-    void audio.play();
-  } catch {
-    toast('音频播放失败，请重试');
+    await audio.play();
+    return true;
+  } catch (error) {
+    if (version !== audioVersion) return false;
+    if (error instanceof DOMException && error.name === 'NotAllowedError') {
+      const button = document.createElement('button');
+      button.id = 'audio-retry';
+      button.className = 'fixed bottom-4 right-4 z-[999] rounded-2xl bg-grass px-5 py-3 font-bold text-white shadow-float';
+      button.textContent = '🔊 点击播放语音';
+      button.onclick = () => { void playAudio(url); };
+      document.body.appendChild(button);
+      toast('语音已准备好，请点击播放');
+    } else {
+      toast('音频播放失败，请检查网络后重试');
+    }
+    return false;
   }
 }

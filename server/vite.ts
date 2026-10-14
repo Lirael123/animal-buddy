@@ -5,15 +5,16 @@ import type { Application, Request, Response } from 'express';
 import express from 'express';
 import path from 'path';
 import fs from 'fs';
-import { createServer as createViteServer } from 'vite';
-import viteConfig from '../vite.config';
+import { isProduction } from './environment';
 
-const isDev = process.env.COZE_PROJECT_ENV !== 'PROD';
+const isDev = !isProduction;
 
 /**
  * 集成 Vite 开发服务器（中间件模式）
  */
 export async function setupViteMiddleware(app: Application) {
+  const { createServer: createViteServer } = await import('vite');
+  const { default: viteConfig } = await import('../vite.config');
   const vite = await createViteServer({
     ...viteConfig,
     server: {

@@ -7,5 +7,6 @@ Set-Location $workspace
 
 Write-Host "Starting express production server on port $port..."
 $env:PORT = "$port"
+$env:NODE_ENV = 'production'
 & node dist-server/server.js
 exit $LASTEXITCODE

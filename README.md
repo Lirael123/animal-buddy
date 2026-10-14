@@ -26,7 +26,7 @@ coze-dev dev
 coze-dev build
 ```
 
-构建产物位于 `dist/` 目录，可直接部署到静态托管服务。
+构建生成 `dist/`（前端）和 `dist-server/`（Express 后端）。本应用的 ASR、TTS、教学工作流和学习记录需要 Node 后端；只把 `dist/` 放到 GitHub Pages 等静态托管服务，会导致 `/api/*` 失效。GitHub 仓库保存源代码，不会自动更新扣子线上版本。
 
 ### 预览生产版本
 
@@ -34,7 +34,19 @@ coze-dev build
 coze-dev start
 ```
 
-在本地启动一个静态服务器，预览生产构建的效果。
+启动 Express 生产服务器，同时提供前端和 API。普通 Node 托管环境使用 `corepack pnpm install --frozen-lockfile`、`corepack pnpm build`、`corepack pnpm start`；请使用 packageManager 指定的 pnpm 9。
+
+### Animal Buddy 运行配置与验证
+
+- 服务端读取 `.env`（参考 `.env.example`）。模型、语音和存储凭据不能用 `VITE_` 前缀，否则可能进入浏览器构建。
+- 扣子发布环境沿用平台注入的 SDK 身份；外部 Node 托管需配置 SDK 支持的 `COZE_API_TOKEN`，并验证账号权限、配额和对象存储配置。GitHub 访问令牌不能用作 Coze API 凭据。
+- `AB_SESSION_SECRET` 设置为固定的随机长字符串（至少 32 字节），使签名匿名学生 cookie 在重启后继续有效；未设置时使用本次进程的随机密钥，重启会重新生成学生身份。多个实例必须使用同一密钥。
+- 学生身份由 HttpOnly 签名 cookie 确定，忽略客户端传入的 uid。旧的共享 `animal-buddy-user` 数据保留，但不能分配给某一位新学生。当前无实名账号或教师端认证。
+- 教材原声优先从仓库 `assets/*.mp3` 同源提供；缺文件时才尝试原对象存储链接。单句听写使用对应题目文字的 TTS，明确标为合成朗读；未核验录音切片不能用于单句评分。
+- `/api/health` 只报告后端存活及云端凭据是否配置，`checked:false` 表示没有证明服务可调用；模型成功响应后页面才显示“模型已响应”。模型不可用时使用明确标注的教材工作流话术。ASR/TTS 不伪装成功。
+- 生产环境会话仍是单进程内存态，学习记录仍依赖对象存储。多实例正式使用前应迁移会话与记录到共享数据库，并实现存储分页（当前对超过 1000 条记录明确报错）。
+- 验证：`corepack pnpm ts-check`、`corepack pnpm build`、`corepack pnpm test`。浏览器中再核验麦克风授权、30 秒录音上限、重听、场景切换和移动端点击播放。
+- GitHub 修复提交完成后，需在扣子导入更新代码、重新构建并发布，原 `coze.site` 地址才会应用修改。
 
 ## 项目结构
 
@@ -340,7 +352,7 @@ fetchData().then(data => {
 
 ### 环境变量
 
-在 `.env` 文件中定义环境变量（需以 `VITE_` 开头）：
+仅允许公开的前端配置使用 `VITE_` 前缀；服务端密钥使用不带此前缀的变量，并保存在服务端 `.env` 或托管平台密钥设置中：
 
 ```bash
 VITE_API_URL=https://api.example.com

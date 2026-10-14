@@ -4,8 +4,23 @@ import { runTutorTurn, startScene } from '../tutor/workflow';
 import { UNIT_AUDIO, getUnitAudio } from '../tutor/audio';
 import { pickDictationPool, getDictationItem, toPublic, scoreDictation } from '../tutor/dictation';
 import { recordSubmission, listAttempts, aggregateProgress } from '../tutor/records';
+import { studentUid } from '../identity';
+import { existsSync } from 'node:fs';
+import path from 'node:path';
+import type { UnitAudio } from '../tutor/audio';
 
 const router = Router();
+const originalFile = (audio: UnitAudio): string => path.resolve('assets', audio.fileName);
+async function audioUrl(audio: UnitAudio): Promise<string> {
+  if (existsSync(originalFile(audio))) return `/api/audio/${audio.id}/file`;
+  return new S3Storage({}).generatePresignedUrl({ key: audio.storageKey, expireTime: 3600 });
+}
+
+router.get('/api/audio/:id/file', (req, res) => {
+  const audio = getUnitAudio(String(req.params.id));
+  if (!audio || !existsSync(originalFile(audio))) return res.status(404).json({ error: 'original_audio_missing' });
+  return res.sendFile(originalFile(audio));
+});
 
 // 从入站请求转发鉴权/追踪头（SDK 要求）
 function forward(req: import('express').Request): Record<string, string> {
@@ -13,9 +28,7 @@ function forward(req: import('express').Request): Record<string, string> {
 }
 
 function uidOf(req: import('express').Request): string {
-  const fromQuery = String(req.query.uid ?? '');
-  const fromBody = String((req.body as { uid?: string })?.uid ?? '');
-  return fromQuery || fromBody || '';
+  return studentUid(req);
 }
 
 /**
@@ -41,7 +54,7 @@ router.post('/api/asr', async (req, res) => {
       return res.status(400).json({ error: 'missing audio url or base64Data' });
     }
     const uid = uidOf(req);
-    const client = new ASRClient(new Config(), forward(req));
+    const client = new ASRClient(new Config({ timeout: 10000, retryTimes: 0 }), forward(req));
     const result = await client.recognize({ uid, url, base64Data });
     res.json({ text: result.text, duration: result.duration ?? null });
   } catch (e) {
@@ -61,7 +74,8 @@ router.post('/api/tts', async (req, res) => {
       return res.status(400).json({ error: 'missing text' });
     }
     const uid = uidOf(req);
-    const client = new TTSClient(new Config(), forward(req));
+    if (text.length > 1000) return res.status(400).json({ error: 'text too long' });
+    const client = new TTSClient(new Config({ timeout: 10000, retryTimes: 0 }), forward(req));
     const resp = await client.synthesize({
       uid,
       text,
@@ -210,16 +224,14 @@ router.get('/api/audio', async (req, res) => {
     const page = Number((req.query as { page?: string }).page ?? NaN);
     const source = Number.isInteger(page) && page > 0 ? UNIT_AUDIO.filter((a) => a.page === page) : UNIT_AUDIO;
 
-    const storage = new S3Storage({});
-    const signed = [];
-    for (const a of source) {
+    const signed = await Promise.all(source.map(async a => {
       let url: string | null = null;
       try {
-        url = await storage.generatePresignedUrl({ key: a.storageKey, expireTime: 3600 });
+        url = await audioUrl(a);
       } catch {
         url = null;
       }
-      signed.push({
+      return {
         id: a.id,
         page: a.page,
         part: a.part,
@@ -230,9 +242,9 @@ router.get('/api/audio', async (req, res) => {
         textVerified: a.textVerified,
         answerVerified: a.answerVerified,
         matchStatus: a.matchStatus,
-      });
-    }
-    res.json({ engine: 'object-storage', count: signed.length, items: signed });
+      };
+    }));
+    res.json({ engine: 'original-mp3', count: signed.length, items: signed });
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
     console.error('[audio] list failed:', msg);
@@ -247,8 +259,7 @@ router.get('/api/audio/:id', async (req, res) => {
     if (!audio) {
       return res.status(404).json({ error: `no such audio ${id}` });
     }
-    const storage = new S3Storage({});
-    const url = await storage.generatePresignedUrl({ key: audio.storageKey, expireTime: 3600 });
+    const url = await audioUrl(audio);
     res.json({
       id: audio.id,
       page: audio.page,
@@ -317,6 +328,9 @@ router.post('/api/dictation/submit', async (req, res) => {
     }
     const ans = String(answer ?? '').trim();
     if (!ans) return res.status(400).json({ error: 'missing answer' });
+    if (!session || !/^[a-zA-Z0-9_-]{3,80}$/.test(session)) {
+      return res.status(400).json({ error: 'invalid practice session' });
+    }
 
     const score = scoreDictation(ans, item, !!isAsr);
 
@@ -365,19 +379,11 @@ router.post('/api/dictation/audio', async (req, res) => {
     const item = qid ? getDictationItem(String(qid)) : undefined;
     if (!item) return res.status(404).json({ error: `no such dictation ${qid}` });
 
-    if (item.source === 'textbook') {
-      // 教材句子：优先匹配对应原声；无原声则回落 TTS 并如实标注
-      const id = mapSentenceAudio(item.id);
-      const audio = id ? getUnitAudio(id) : undefined;
-      const storage = new S3Storage({});
-      if (audio) {
-        const url = await storage.generatePresignedUrl({ key: audio.storageKey, expireTime: 3600 });
-        return res.json({ engine: 'textbook-mp3', id: audio.id, url, source: 'textbook' });
-      }
-    }
+    // Whole-page recordings have no verified sentence timestamps. Use the exact
+    // exercise text for TTS; retain original recordings in /api/audio for listening.
 
     // 教学改编 / 单词：TTS 合成语音，明确标注为 AI 合成（与教材原声区分）
-    const client = new TTSClient(new Config(), forward(req));
+    const client = new TTSClient(new Config({ timeout: 10000, retryTimes: 0 }), forward(req));
     const resp = await client.synthesize({
       uid,
       text: item.audioText,
@@ -420,21 +426,5 @@ router.get('/api/progress', async (req, res) => {
     res.status(500).json({ error: 'progress failed', detail: msg });
   }
 });
-
-/** U3 教材句子 → 对应原声 ID（已核验可回放；未核验的返回空走 TTS） */
-function mapSentenceAudio(qid: string): string | null {
-  const map: Record<string, string> = {
-    'U3-029': 'U03_01',
-    'U3-030': 'U03_02',
-    'U3-031': 'U03_03',
-    'U3-032': 'U03_04',
-    'U3-033': 'U03_05',
-    'U3-041': 'U03_07',
-    'U3-042': 'U03_08',
-    'U3-043': 'U03_09',
-    'U3-044': 'U03_10',
-  };
-  return map[qid] ?? null;
-}
 
 export default router;

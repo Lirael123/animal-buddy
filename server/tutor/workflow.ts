@@ -66,6 +66,7 @@ export interface TutorFeedback {
   /** ASR 置信度提示（低置信度/空结果时非空，说明不算知识错误） */
   asrNote?: string;
   engine: 'builtin-doubao-workflow';
+  replySource: 'model' | 'script';
 }
 
 interface SessionState {
@@ -129,7 +130,7 @@ function evaluateAnswer(raw: string, turn: DialogueTurn): Evaluation {
   }
 
   // 明确语法错误（I has 等）优先于"裸词子串命中"，避免把语法错的句子误判为正确。
-  const hardIssue = detectHardGrammarError(n, turn);
+  const hardIssue = detectHardGrammarError(n);
   if (hardIssue) {
     return { verdict: 'incorrect', sourceKind: 'adapted', issue: hardIssue, errorType: 'grammar' };
   }
@@ -184,7 +185,7 @@ function evaluateAnswer(raw: string, turn: DialogueTurn): Evaluation {
  * 任何轮次都优先拦截。示范会由 jointGrammarModel 结合"学生已说的动物词 + 本轮句型"生成，
  * 既针对实际错误，又保证与当前题目一致（不会出现 Zoo 第一轮却示范 I have... 的脱节）。
  */
-function detectHardGrammarError(normalized: string, _turn: DialogueTurn): string | null {
+function detectHardGrammarError(normalized: string): string | null {
   if (/\bi has\b/i.test(normalized)) {
     return '说“我有……”的时候，I（我）后面要用 have，不能用 has。';
   }
@@ -332,7 +333,7 @@ async function generateReply(
   history: { role: 'user' | 'assistant'; content: string }[],
 ): Promise<{ reply: string; replyZh: string }> {
   const client = new LLMClient(
-    new Config(),
+    new Config({ timeout: 6000, retryTimes: 0 }),
     HeaderUtils.extractForwardHeaders(req.headers as Record<string, string>),
   );
 
@@ -353,28 +354,28 @@ async function generateReply(
 
 /** 健壮解析模型输出的 JSON（容忍模型偶尔包裹 ```json 或多余文字） */
 function parseModelJson(content: string): { reply: string; replyZh: string } {
-  const fallback = { reply: 'Good job! Let us keep going.', replyZh: '' };
-  if (!content) return fallback;
-  let text = content.trim();
-  const fence = text.match(/```(?:json)?\s*([\s\S]*?)```/i);
-  if (fence) text = fence[1].trim();
+  const fence = content.match(/```(?:json)?\s*([\s\S]*?)```/i);
+  const text = (fence ? fence[1] : content).trim();
   const start = text.indexOf('{');
   const end = text.lastIndexOf('}');
-  if (start === -1 || end === -1 || end <= start) {
-    // 模型未按 JSON 返回：把整句作为英文回复，避免流程中断
-    return { reply: text.replace(/\s+/g, ' ').slice(0, 160), replyZh: '' };
+  if (start < 0 || end <= start) throw new Error('model returned invalid JSON');
+  const obj: unknown = JSON.parse(text.slice(start, end + 1));
+  if (typeof obj !== 'object' || obj === null || !('reply' in obj) || typeof obj.reply !== 'string' || !obj.reply.trim()) {
+    throw new Error('model returned no usable reply');
   }
-  try {
-    const obj = JSON.parse(text.slice(start, end + 1)) as { reply?: unknown; replyZh?: unknown };
-    const reply = typeof obj.reply === 'string' && obj.reply.trim() ? obj.reply.trim() : fallback.reply;
-    const replyZh = typeof obj.replyZh === 'string' ? obj.replyZh.trim() : '';
-    return { reply, replyZh };
-  } catch {
-    return { reply: text.slice(start, end + 1).replace(/\s+/g, ' ').slice(0, 160), replyZh: '' };
-  }
+  return { reply: obj.reply.trim().slice(0, 320),
+    replyZh: 'replyZh' in obj && typeof obj.replyZh === 'string' ? obj.replyZh.trim().slice(0, 500) : '' };
 }
 
 function startSession(uid: string, sceneKey: string): SessionState {
+  const now = Date.now();
+  for (const [key, value] of sessions) {
+    if (now - value.updatedAt > 30 * 60 * 1000) sessions.delete(key);
+  }
+  if (sessions.size >= 10000) {
+    const oldest = sessions.keys().next().value;
+    if (oldest) sessions.delete(oldest);
+  }
   const s: SessionState = {
     scene: sceneKey,
     roundIndex: 0,
@@ -398,13 +399,28 @@ export interface RunInput {
 /**
  * 主入口：处理学生一轮回答，推进教学工作流。
  */
+const pendingTurns = new Map<string, Promise<unknown>>();
 export async function runTutorTurn(req: Request, input: RunInput): Promise<TutorFeedback> {
+  const key = sessionKey(input.uid, input.scene);
+  const previous = pendingTurns.get(key) || Promise.resolve();
+  const result = previous.catch(() => undefined).then(() => processTutorTurn(req, input));
+  pendingTurns.set(key, result);
+  try { return await result; }
+  finally { if (pendingTurns.get(key) === result) pendingTurns.delete(key); }
+}
+async function processTutorTurn(req: Request, input: RunInput): Promise<TutorFeedback> {
   const sceneKey = SCENES[input.scene] ? input.scene : 'my-pet';
   const scene = SCENES[sceneKey];
 
   if (input.reset) sessions.delete(sessionKey(input.uid, sceneKey));
   let state = sessions.get(sessionKey(input.uid, sceneKey));
   if (!state) state = startSession(input.uid, sceneKey);
+  if (state.roundIndex >= scene.turns.length) {
+    const last = scene.turns[scene.turns.length - 1];
+    return { reply: 'Great talking with you! See you next time!', replyZh: '本场景已完成，请点击清空重新练习。',
+      verdict: 'correct', round: last.round, question: last.ask, sourceKind: 'adapted', page: last.page,
+      finished: true, action: 'finish', errorType: 'none', engine: 'builtin-doubao-workflow', replySource: 'script' };
+  }
 
   const turn = scene.turns[state.roundIndex] ?? scene.turns[scene.turns.length - 1];
   const evaluation = evaluateAnswer(input.text, turn);
@@ -506,7 +522,29 @@ export async function runTutorTurn(req: Request, input: RunInput): Promise<Tutor
     '\n【硬性约束】你只负责输出这一轮单句英文教学话术（可配极简中文 replyZh）。' +
     '严禁自行给出/改变教材标准答案、页码或本题判定结果；不得引入教材外的词、不得跳题、不得加问句。';
 
-  const generated = await generateReply(req, scene, instruction, input.history);
+  // Always retain a script-consistent response when the optional model is unavailable.
+  const scriptReply = asrNote ? 'Sorry, I did not hear you. Please say it again.'
+    : action === 'advance' ? `Well done! ${scene.turns[state.roundIndex].ask}`
+    : action === 'finish' ? 'Great talking with you! See you next time!'
+    : action === 'retry_model' ? `Listen: ${correction?.modelAnswer} Now you say it!`
+    : `Try again, please. ${turn.ask}`;
+  let generated = { reply: scriptReply, replyZh };
+  let replySource: 'model' | 'script' = 'script';
+  let timer: ReturnType<typeof setTimeout> | undefined;
+  try {
+    const response = await Promise.race([
+      generateReply(req, scene, instruction, input.history),
+      new Promise<never>((_resolve, reject) => { timer = setTimeout(() => reject(new Error('model deadline')), 6500); }),
+    ]);
+    // The next scripted question must survive model paraphrasing/omission.
+    if (action === 'advance' && !response.reply.includes(scene.turns[state.roundIndex].ask)) response.reply = scriptReply;
+    generated = response;
+    replySource = 'model';
+  } catch {
+    // Scoring and curriculum workflow remain deterministic and available.
+  } finally {
+    if (timer) clearTimeout(timer);
+  }
   // 中文提示以工作流判定为准（模型只负责英文），保证纠错信息确定可控
   if (replyZh) generated.replyZh = replyZh;
 
@@ -525,6 +563,7 @@ export async function runTutorTurn(req: Request, input: RunInput): Promise<Tutor
     errorType: asrNote ? (evaluation.errorType === 'asr_empty' ? 'asr_empty' : 'unclear_transcript') : evaluation.errorType,
     asrNote,
     engine: 'builtin-doubao-workflow',
+    replySource,
   };
 }
 

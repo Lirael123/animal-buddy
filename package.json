@@ -3,6 +3,7 @@
   "version": "1.0.0",
   "description": "Vanilla TypeScript application with Express + Vite (HTML + CSS + TS + Node API)",
   "scripts": {
+    "test": "node --import tsx --test tests/*.test.ts",
     "build": "bash ./scripts/build.sh",
     "dev": "bash ./scripts/dev.sh",
     "preinstall": "npx only-allow pnpm",

@@ -1,4 +1,5 @@
-import { toast } from '../components/ui';
+import { pageVersion, isCurrentPage } from './lifecycle';
+import { toast, playAudio, escapeHtml } from '../components/ui';
 import { topBar, sideMenu, bindShell, type SideItem } from '../components/shell';
 import {
   fetchDictationRecords,
@@ -7,7 +8,6 @@ import {
   submitDictation,
   type DictationRecordItem,
   type DictationItem,
-  type DictationScoreResult,
 } from '../api/client';
 
 const TABS: SideItem[] = [
@@ -59,10 +59,12 @@ export function renderRetry(): string {
 }
 
 async function loadContent(root: HTMLElement): Promise<void> {
+  const version = pageVersion();
   const content = root.querySelector('#retry-content');
   if (!content) return;
   try {
     const wrong = await loadWrong();
+    if (!isCurrentPage(version)) return;
     if (wrong.length === 0) {
       content.innerHTML = `
         <div class="py-24 text-center">
@@ -110,15 +112,16 @@ async function loadContent(root: HTMLElement): Promise<void> {
     bindWrongActions(root, wrong);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    content.innerHTML = `<div class="py-20 text-center text-lg font-bold text-ink/50">加载失败：${msg}</div>`;
+    if (!isCurrentPage(version)) return;
+    content.innerHTML = `<div class="py-20 text-center text-lg font-bold text-ink/50">加载失败：${escapeHtml(msg)}</div>`;
   }
 }
 
 function bindWrongActions(root: HTMLElement, wrong: RetryEntry[]): void {
-  const currentSession = `retry-${Date.now()}`;
   let active: RetryEntry | null = null;
   let answered = false;
-  let lastResult: DictationScoreResult | null = null;
+  let submitting = false;
+  const version = pageVersion();
 
   const panel = root.querySelector<HTMLElement>('#practice-panel');
   const qEl = root.querySelector<HTMLElement>('#practice-q');
@@ -129,7 +132,6 @@ function bindWrongActions(root: HTMLElement, wrong: RetryEntry[]): void {
   const openPractice = (entry: RetryEntry): void => {
     active = entry;
     answered = false;
-    lastResult = null;
     if (panel && qEl && input && resultEl) {
       panel.classList.remove('hidden');
       qEl.textContent = entry.item!.source === 'textbook'
@@ -142,7 +144,7 @@ function bindWrongActions(root: HTMLElement, wrong: RetryEntry[]): void {
   };
 
   const submit = async (): Promise<void> => {
-    if (!active) return;
+    if (!active || submitting) return;
     if (answered) {
       // 已答对 → 重新加载（该题移出错题本）
       await loadContent(root);
@@ -153,26 +155,27 @@ function bindWrongActions(root: HTMLElement, wrong: RetryEntry[]): void {
       toast('先写下你听到的内容');
       return;
     }
+    submitting = true;
     try {
       const res = await submitDictation(active.record.qid, val, {
         session: active.record.session,
         isRetry: true,
       });
-      lastResult = res;
+      if (!isCurrentPage(version)) return;
       answered = res.correct;
       if (resultEl) {
         resultEl.innerHTML = res.correct
           ? `<div class="animate-pop-in rounded-2xl bg-grass-pale px-4 py-3 ring-2 ring-grass-soft"><span class="text-lg font-extrabold text-grass-deep">🎉 答对啦！已从错题本移除。</span></div>`
           : `<div class="animate-pop-in rounded-2xl bg-orange-light/40 px-4 py-3 ring-2 ring-orange-light">
-               <span class="text-lg font-extrabold text-orange-deep">${res.hint}</span>
-               ${res.reference ? `<p class="mt-1 text-base font-bold text-ink/70">规范表达：<b>${res.reference}</b></p>` : ''}
+               <span class="text-lg font-extrabold text-orange-deep">${escapeHtml(res.hint)}</span>
+               ${res.reference ? `<p class="mt-1 text-base font-bold text-ink/70">规范表达：<b>${escapeHtml(res.reference)}</b></p>` : ''}
              </div>`;
       }
       if (submitBtn) submitBtn.textContent = res.correct ? '完成 ✓' : '再试一次';
     } catch (e) {
       const msg = e instanceof Error ? e.message : String(e);
-      toast(`提交失败：${msg}`);
-    }
+      if (isCurrentPage(version)) toast(`提交失败：${escapeHtml(msg)}`);
+    } finally { submitting = false; }
   };
 
   root.querySelectorAll<HTMLButtonElement>('[data-audio]').forEach((btn) => {
@@ -182,8 +185,8 @@ function bindWrongActions(root: HTMLElement, wrong: RetryEntry[]): void {
       if (!entry) return;
       void fetchDictationAudio(id)
         .then((res) => {
-          const aud = new Audio(res.url);
-          aud.play().catch(() => toast('播放失败'));
+          if (!isCurrentPage(version)) return;
+          void playAudio(res.url);
           toast(res.source === 'textbook' ? '播放教材原声 🎧' : '播放 AI 合成语音（教学改编）');
         })
         .catch(() => toast('语音播放失败'));

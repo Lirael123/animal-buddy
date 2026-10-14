@@ -1,5 +1,6 @@
+import { escapeHtml } from '../components/ui';
+import { pageVersion, isCurrentPage } from './lifecycle';
 import { ASSETS } from '../assets';
-import { toast } from '../components/ui';
 import { topBar, sideMenu, bindShell, type SideItem } from '../components/shell';
 import {
   fetchProgress,
@@ -45,19 +46,22 @@ export function renderProgress(): string {
 }
 
 async function loadOverview(root: HTMLElement): Promise<void> {
+  const version = pageVersion();
   const content = root.querySelector('#progress-content');
   if (!content) return;
   try {
     const [p, records, list] = await Promise.all([
       fetchProgress(),
-      fetchDictationRecords().catch(() => [] as DictationRecordItem[]),
-      fetchDictationList().catch(() => ({ items: [] as DictationItem[] })),
+      fetchDictationRecords(),
+      fetchDictationList(),
     ]);
+    if (!isCurrentPage(version)) return;
     const titleMap = new Map(list.items.map((i) => [i.id, i]));
     content.innerHTML = renderOverview(p, records, titleMap);
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    content.innerHTML = `<div class="py-20 text-center text-lg font-bold text-ink/50">加载失败：${msg}</div>`;
+    if (!isCurrentPage(version)) return;
+    content.innerHTML = `<div class="py-20 text-center text-lg font-bold text-ink/50">加载失败：${escapeHtml(msg)}</div>`;
   }
 }
 

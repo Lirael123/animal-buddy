@@ -13,8 +13,8 @@ export default defineConfig({
       timeout: 30000,
     },
     watch: {
-      usePolling: true,
-      interval: 100,
+      usePolling: process.env.COZE_WATCH_POLLING === 'true',
+      interval: 1000,
     }
   },
 });

@@ -1,7 +1,10 @@
 import { Router } from 'express';
 import voiceRouter from './voice';
+import { Config } from 'coze-coding-dev-sdk';
+import { studentUid } from '../identity';
 
 const router = Router();
+router.get('/api/session', (req, res) => res.json({ uid: studentUid(req) }));
 
 // 真实语音交互链路：ASR / TTS / LLM(Agent) / 对话记录
 router.use(voiceRouter);
@@ -27,6 +30,9 @@ router.post('/api/data', (req, res) => {
 router.get('/api/health', (req, res) => {
   res.json({
     status: 'ok',
+    tutor: 'builtin',
+    cloudConfigured: Boolean(new Config().apiKey),
+    checked: false,
     env: process.env.COZE_PROJECT_ENV,
     timestamp: new Date().toISOString(),
   });

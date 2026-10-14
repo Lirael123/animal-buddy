@@ -159,8 +159,6 @@ export interface DictationScore {
   asrSkipped: boolean;
 }
 
-const NEW_LINE = '\n';
-
 /**
  * 单一评分子题（单词）：忽略大小写，单词本身不允许容错拼写；
  * 但“语义等价”（如 fish 单复数）按题库 acceptable 判定。
@@ -282,7 +280,7 @@ function contentOverlap(a: string[], b: string[]): number {
  */
 export function scoreDictation(student: string, item: DictationItem, isAsr = false): DictationScore {
   const stripped = (student || '').trim();
-  if (!stripped || stripped.length <= 1) {
+  if (!stripped || (isAsr && stripped.length <= 1)) {
     return {
       status: 'unclear',
       vocabOk: false,

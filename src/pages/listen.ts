@@ -1,5 +1,6 @@
+import { pageVersion, isCurrentPage } from './lifecycle';
 import { ASSETS } from '../assets';
-import { toast } from '../components/ui';
+import { toast, playAudio, escapeHtml } from '../components/ui';
 import { topBar, sideMenu, bindShell, type SideItem } from '../components/shell';
 import {
   fetchDictationList,
@@ -24,6 +25,10 @@ const state: {
   answered: boolean;
   status: DictationScoreResult | null;
   session: string;
+  loaded: boolean;
+  loading: boolean;
+  submitting: boolean;
+  loadError: string;
 } = {
   filter: 'all',
   pool: [],
@@ -31,6 +36,10 @@ const state: {
   answered: false,
   status: null,
   session: '',
+  loaded: false,
+  loading: false,
+  submitting: false,
+  loadError: '',
 };
 
 /** 每个练习批次一个 session（同一轮内重练/刷新沿用，避免成绩重复累计） */
@@ -47,36 +56,48 @@ function ensureSession(): string {
   return s;
 }
 
-function filterPool(pool: DictationItem[], f: FilterKey): DictationItem[] {
-  if (f === 'all') return pool;
-  return pool.filter((i) => i.type === f);
+let loadGeneration = 0;
+export function cleanupListen(): void {
+  loadGeneration++;
+  if (state.loading) state.loaded = false;
+  state.loading = state.submitting = false;
 }
-
 async function loadPool(filter: FilterKey): Promise<void> {
+  const version = pageVersion();
+  const generation = ++loadGeneration;
+  state.loading = true;
+  state.loadError = '';
   try {
     const res = await fetchDictationList(filter === 'all' ? '' : (filter as 'word' | 'sentence'));
     const all = filter === 'all' ? res.items : await (async () => {
       // 已按 type 返回，无需二次请求
       return res.items;
     })();
+    if (!isCurrentPage(version) || filter !== state.filter) return;
     state.pool = all;
     state.index = 0;
     state.answered = false;
     state.status = null;
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
+    if (!isCurrentPage(version) || filter !== state.filter) return;
+    state.loadError = msg;
     toast(`加载题目失败：${msg}`);
     state.pool = [];
+  } finally {
+    if (generation === loadGeneration) { state.loaded = true; state.loading = false; }
   }
 }
 
 /** 播放当前题语音（教材原声或 TTS，如实标注来源） */
+let playbackRequest = 0;
 async function playCurrent(qid: string): Promise<void> {
+  const version = pageVersion();
+  const request = ++playbackRequest;
   try {
     const res = await fetchDictationAudio(qid);
-    const aud = new Audio(res.url);
-    aud.preload = 'auto';
-    aud.play().catch(() => toast('播放失败，请重试'));
+    if (!isCurrentPage(version) || request !== playbackRequest || state.pool[state.index]?.id !== qid) return;
+    await playAudio(res.url);
     if (res.source === 'textbook') {
       toast('正在播放教材原声 🎧');
     } else {
@@ -84,7 +105,7 @@ async function playCurrent(qid: string): Promise<void> {
     }
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    toast(`语音播放失败：${msg}`);
+    if (isCurrentPage(version)) toast(`语音播放失败：${msg}`);
   }
 }
 
@@ -98,7 +119,6 @@ function eqWave(): string {
 }
 
 export function renderListen(): string {
-  const filter = FILTERS.find((x) => x.key === state.filter) ?? FILTERS[0];
   const total = state.pool.length;
   const item = state.pool[state.index];
   const progressPct = total ? ((state.index + (state.answered ? 1 : 0)) / total) * 100 : 0;
@@ -122,7 +142,7 @@ export function renderListen(): string {
           !item
             ? `<div class="py-20 text-center">
                  <p class="text-5xl">📭</p>
-                 <p class="mt-3 text-xl font-extrabold text-ink/50">暂时没有可练习的题目，请换个分类试试</p>
+                 <p class="mt-3 text-xl font-extrabold text-ink/50">${state.loadError ? escapeHtml(state.loadError) : state.loading ? '题库加载中…' : '暂无题目或本组练习已完成'}</p>
                  <button data-reload class="pressable mt-5 rounded-2xl bg-grass px-6 py-3 text-lg font-extrabold text-white">重新加载</button>
                </div>`
             : `
@@ -139,7 +159,7 @@ export function renderListen(): string {
           <span class="rounded-full px-3 py-1 text-sm font-extrabold ${
             item.source === 'textbook' ? 'bg-grass-pale text-grass-deep' : 'bg-sky-light/70 text-sky-deep'
           }">
-            ${item.source === 'textbook' ? '🎧 教材原声' : '✨ AI 合成（教学改编）'}
+            ${item.source === 'textbook' ? '✨ AI 合成朗读（教材句子）' : '✨ AI 合成（教学改编）'}
           </span>
           <span class="rounded-full bg-cream-deep px-3 py-1 text-sm font-bold text-ink/50">${item.type === 'word' ? '单词听写' : '句型巩固'} · ${item.difficulty}</span>
           ${item.scorable ? '' : '<span class="rounded-full bg-orange-light/50 px-3 py-1 text-sm font-bold text-orange-deep">仅展示</span>'}
@@ -160,12 +180,12 @@ export function renderListen(): string {
         </p>
 
         <!-- 输入 -->
-        <input id="listen-input" type="text" autocomplete="off" placeholder="请输入你听到的英文（可拼写，也可按 🎤 说话）…"
+        <input id="listen-input" type="text" autocomplete="off" placeholder="请输入你听到的英文…"
           class="mt-3 w-full rounded-2xl border-2 border-mint-soft bg-cream/60 px-5 py-4 text-xl font-bold text-ink outline-none transition-colors focus:border-grass" />
 
         <div class="mt-3 flex items-center gap-3">
           <button id="submit-answer" class="pressable flex-1 rounded-2xl bg-grass py-4 text-2xl font-extrabold text-white shadow-float">提交答案</button>
-          <button data-mic class="pressable grid h-14 w-14 place-items-center rounded-2xl bg-orange text-2xl text-white shadow-sm" title="用语音回答">🎤</button>
+          <button data-mic class="pressable rounded-2xl bg-mint-pale px-3 py-2 text-sm font-bold text-ink/60" title="查看语音输入说明">语音说明</button>
         </div>
 
         <div id="answer-result" class="mt-3"></div>
@@ -209,6 +229,8 @@ function rerender(root: HTMLElement, autoplay: boolean): void {
 
 /** 提交当前题 */
 async function submitAnswer(root: HTMLElement): Promise<void> {
+  if (state.submitting) return;
+  const version = pageVersion();
   if (state.answered) {
     // 已提交且答对 → 下一题
     nextQuestion(root);
@@ -223,35 +245,42 @@ async function submitAnswer(root: HTMLElement): Promise<void> {
     return;
   }
   const session = ensureSession();
+  state.submitting = true;
+  const button = root.querySelector<HTMLButtonElement>('#submit-answer');
+  if (button) button.disabled = true;
   try {
     const res = await submitDictation(item.id, value, { session, isRetry: false });
+    if (!isCurrentPage(version) || state.pool[state.index]?.id !== item.id) return;
     state.answered = res.correct;
     state.status = res;
-    showResult(root, res, item);
+    showResult(root, res);
     const btn = document.getElementById('submit-answer');
     if (btn) btn.textContent = res.correct ? '下一题 ➜' : '再试一次';
   } catch (e) {
     const msg = e instanceof Error ? e.message : String(e);
-    toast(`提交失败：${msg}`);
+    if (isCurrentPage(version)) toast(`提交失败：${msg}`);
+  } finally {
+    state.submitting = false;
+    if (button) button.disabled = false;
   }
 }
 
-function showResult(root: HTMLElement, res: DictationScoreResult, item: DictationItem): void {
+function showResult(root: HTMLElement, res: DictationScoreResult): void {
   const result = document.getElementById('answer-result');
   if (!result) return;
   if (res.asrSkipped) {
     result.innerHTML = `<div class="animate-pop-in flex items-center gap-3 rounded-2xl bg-sky-light/70 px-4 py-3 ring-2 ring-sky">
-      <span class="text-2xl">🤔</span><span class="text-lg font-extrabold text-ink/70">${res.hint}</span></div>`;
+      <span class="text-2xl">🤔</span><span class="text-lg font-extrabold text-ink/70">${escapeHtml(res.hint)}</span></div>`;
     return;
   }
   if (res.correct) {
     result.innerHTML = `<div class="animate-pop-in flex items-center gap-3 rounded-2xl bg-grass-pale px-4 py-3 ring-2 ring-grass-soft">
-      <span class="text-2xl">🎉</span><span class="text-lg font-extrabold text-grass-deep">${res.hint}</span></div>`;
+      <span class="text-2xl">🎉</span><span class="text-lg font-extrabold text-grass-deep">${escapeHtml(res.hint)}</span></div>`;
   } else {
     result.innerHTML = `<div class="animate-pop-in rounded-2xl bg-orange-light/40 px-4 py-3 ring-2 ring-orange-light">
       <div class="flex items-center gap-3"><span class="text-2xl">💪</span>
-      <span class="text-lg font-extrabold text-orange-deep">${res.hint}</span></div>
-      ${res.reference ? `<p class="mt-2 rounded-xl bg-white/80 px-3 py-2 text-base font-bold text-ink/70">规范表达：<b>${res.reference}</b></p>` : ''}
+      <span class="text-lg font-extrabold text-orange-deep">${escapeHtml(res.hint)}</span></div>
+      ${res.reference ? `<p class="mt-2 rounded-xl bg-white/80 px-3 py-2 text-base font-bold text-ink/70">规范表达：<b>${escapeHtml(res.reference)}</b></p>` : ''}
     </div>`;
   }
 }
@@ -281,15 +310,18 @@ export function bindListen(root: HTMLElement): void {
   ensureSession();
 
   // 若题库未加载，先加载；加载完成后渲染并自动播放第一题
-  if (state.pool.length === 0) {
+  if (!state.loaded && !state.loading) {
+    const version = pageVersion();
     loadPool(state.filter).then(() => {
-      rerender(root, true);
+      if (isCurrentPage(version)) rerender(root, false);
     });
   }
 
   root.querySelectorAll<HTMLButtonElement>('[data-side]').forEach((btn) => {
     btn.addEventListener('click', () => {
+      if (state.loading || state.submitting) return;
       state.filter = btn.dataset.side as FilterKey;
+      state.loaded = false;
       state.pool = [];
       state.index = 0;
       state.answered = false;
@@ -311,11 +343,13 @@ export function bindListen(root: HTMLElement): void {
   });
 
   root.querySelector<HTMLButtonElement>('[data-reload]')?.addEventListener('click', () => {
+    if (state.loading) return;
+    state.loaded = false;
     rerender(root, false);
   });
 
   root.querySelector<HTMLButtonElement>('[data-mic]')?.addEventListener('click', () => {
-    toast('请点击右上角麦克风按钮开始录音（浏览器录音能力）', { pending: true });
+    toast('本页语音输入尚未接入，请键盘输入；情境对话页支持录音', { pending: true });
   });
 
   const submitBtn = root.querySelector<HTMLButtonElement>('#submit-answer');
